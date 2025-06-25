@@ -1,0 +1,62 @@
+;
+; Egida.inf
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System ; TODO: specify appropriate Class
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318} ; TODO: specify appropriate ClassGuid
+Provider    = %ManufacturerName%
+CatalogFile = Egida.cat
+DriverVer   = ; TODO: set DriverVer in stampinf property pages
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+Egida.sys = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...16299 ; %13% support introduced in build 16299
+
+[Standard.NT$ARCH$.10.0...16299]
+%Egida.DeviceDesc% = Egida_Device, Root\Egida ; TODO: edit hw-id
+
+[Egida_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+Egida.sys
+
+;-------------- Service installation
+[Egida_Device.NT.Services]
+AddService = Egida,%SPSVCINST_ASSOCSERVICE%, Egida_Service_Inst
+
+; -------------- Egida driver install sections
+[Egida_Service_Inst]
+DisplayName    = %Egida.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\Egida.sys
+
+[Egida_Device.NT.Wdf]
+KmdfService = Egida, Egida_wdfsect
+
+[Egida_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+DiskName = "Egida Installation Disk"
+Egida.DeviceDesc = "Egida Device"
+Egida.SVCDESC = "Egida Service"
