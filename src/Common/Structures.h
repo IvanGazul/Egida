@@ -96,6 +96,112 @@ typedef struct _SMBIOS_PROCESSOR_INFO {
     SMBIOS_STRING PartNumber;
 } SMBIOS_PROCESSOR_INFO, * PSMBIOS_PROCESSOR_INFO;
 
+// Memory Device Type Detail (Type 17)
+typedef union _MEMORY_DEVICE_TYPE_DETAIL {
+    struct {
+        UINT16 Reserved1 : 1;
+        UINT16 Other : 1;
+        UINT16 Unknown : 1;
+        UINT16 FastPaged : 1;
+        UINT16 StaticColumn : 1;
+        UINT16 PseudoStatic : 1;
+        UINT16 Rambus : 1;
+        UINT16 Synchronous : 1;
+        UINT16 Cmos : 1;
+        UINT16 Edo : 1;
+        UINT16 WindowDram : 1;
+        UINT16 CacheDram : 1;
+        UINT16 NonVolatile : 1;
+        UINT16 Registered : 1;
+        UINT16 Unbuffered : 1;
+        UINT16 Reserved2 : 1;
+    } Bits;
+    UINT16 Uint16;
+} MEMORY_DEVICE_TYPE_DETAIL;
+
+// Memory Device Operating Mode Capability (Type 17)
+typedef union _MEMORY_DEVICE_OPERATING_MODE_CAPABILITY {
+    struct {
+        UINT16 Reserved : 1;
+        UINT16 Other : 1;
+        UINT16 Unknown : 1;
+        UINT16 VolatileMemory : 1;
+        UINT16 ByteAccessiblePersistentMemory : 1;
+        UINT16 BlockAccessiblePersistentMemory : 1;
+        UINT16 Reserved2 : 10;
+    } Bits;
+    UINT16 Uint16;
+} MEMORY_DEVICE_OPERATING_MODE_CAPABILITY;
+
+// Memory Array Information (Type 16)
+typedef struct _SMBIOS_MEMORY_ARRAY_INFO {
+    SMBIOS_HEADER Header;
+    UINT8 Location;                             // Memory array location
+    UINT8 Use;                                  // Memory array use
+    UINT8 MemoryErrorCorrection;                // Memory error correction
+    UINT32 MaximumCapacity;                     // Maximum capacity in KB
+    UINT16 MemoryErrorInformationHandle;        // Memory error information handle
+    UINT16 NumberOfMemoryDevices;               // Number of memory devices
+    UINT64 ExtendedMaximumCapacity;             // Extended maximum capacity in bytes (SMBIOS 2.7+)
+} SMBIOS_MEMORY_ARRAY_INFO, * PSMBIOS_MEMORY_ARRAY_INFO;
+
+// Memory Device Information (Type 17)
+typedef struct _SMBIOS_MEMORY_DEVICE_INFO {
+    SMBIOS_HEADER Header;
+    UINT16 MemoryArrayHandle;                   // Handle of the memory array
+    UINT16 MemoryErrorInformationHandle;        // Handle of memory error information
+    UINT16 TotalWidth;                          // Total width in bits
+    UINT16 DataWidth;                           // Data width in bits
+    UINT16 Size;                                // Size in MB
+    UINT8 FormFactor;                           // Form factor
+    UINT8 DeviceSet;                            // Device set
+    SMBIOS_STRING DeviceLocator;                // Device locator string
+    SMBIOS_STRING BankLocator;                  // Bank locator string
+    UINT8 MemoryType;                           // Memory type
+    MEMORY_DEVICE_TYPE_DETAIL TypeDetail;      // Type detail
+    UINT16 Speed;                               // Speed in MHz
+    SMBIOS_STRING Manufacturer;                 // Manufacturer string
+    SMBIOS_STRING SerialNumber;                 // Serial number string
+    SMBIOS_STRING AssetTag;                     // Asset tag string
+    SMBIOS_STRING PartNumber;                   // Part number string
+
+    // SMBIOS 2.6+
+    UINT8 Attributes;                           // Attributes
+
+    // SMBIOS 2.7+
+    UINT32 ExtendedSize;                        // Extended size
+    UINT16 ConfiguredMemoryClockSpeed;          // Configured memory clock speed
+
+    // SMBIOS 2.8+
+    UINT16 MinimumVoltage;                      // Minimum voltage in mV
+    UINT16 MaximumVoltage;                      // Maximum voltage in mV
+    UINT16 ConfiguredVoltage;                   // Configured voltage in mV
+
+    // SMBIOS 3.2+
+    UINT8 MemoryTechnology;                     // Memory technology
+    MEMORY_DEVICE_OPERATING_MODE_CAPABILITY MemoryOperatingModeCapability; // Operating mode capability
+    SMBIOS_STRING FirmwareVersion;              // Firmware version string
+    UINT16 ModuleManufacturerID;                // Module manufacturer ID
+    UINT16 ModuleProductID;                     // Module product ID
+    UINT16 MemorySubsystemControllerManufacturerID; // Memory subsystem controller manufacturer ID
+    UINT16 MemorySubsystemControllerProductID;  // Memory subsystem controller product ID
+    UINT64 NonVolatileSize;                     // Non-volatile size in bytes
+    UINT64 VolatileSize;                        // Volatile size in bytes
+    UINT64 CacheSize;                           // Cache size in bytes
+    UINT64 LogicalSize;                         // Logical size in bytes
+
+    // SMBIOS 3.3+
+    UINT32 ExtendedSpeed;                       // Extended speed
+    UINT32 ExtendedConfiguredMemorySpeed;       // Extended configured memory speed
+
+    // SMBIOS 3.7+
+    UINT16 Pmic0ManufacturerID;                 // PMIC0 manufacturer ID
+    UINT16 Pmic0RevisionNumber;                 // PMIC0 revision number
+    UINT16 RcdManufacturerID;                   // RCD manufacturer ID
+    UINT16 RcdRevisionNumber;                   // RCD revision number
+} SMBIOS_MEMORY_DEVICE_INFO, * PSMBIOS_MEMORY_DEVICE_INFO;
+
+
 // Network Card Structure
 typedef struct _NETWORK_ADAPTER_INFO {
     CHAR AdapterName[EGIDA_MAX_STRING_LENGTH];

@@ -7,6 +7,7 @@
 #define SMBIOS_TYPE_BASEBOARD      2
 #define SMBIOS_TYPE_CHASSIS        3
 #define SMBIOS_TYPE_PROCESSOR      4
+#define SMBIOS_TYPE_MEMORY_ARRAY   16
 #define SMBIOS_TYPE_MEMORY_DEVICE  17
 #define SMBIOS_TYPE_END            127
 
@@ -28,6 +29,8 @@ private:
     static NTSTATUS ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO BaseboardInfo, _In_ PEGIDA_CONTEXT Context);
     static NTSTATUS ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ChassisInfo, _In_ PEGIDA_CONTEXT Context);
     static NTSTATUS ProcessProcessorInfo(_In_ PSMBIOS_PROCESSOR_INFO ProcessorInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS ProcessMemoryArrayInfo(_In_ PSMBIOS_MEMORY_ARRAY_INFO MemoryArrayInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO MemoryDeviceInfo, _In_ PEGIDA_CONTEXT Context);
 
     // Utility functions
     static VOID RandomizeString(_In_ PCHAR String, _In_ UINT32 MaxLength = 0);
