@@ -257,9 +257,9 @@ NTSTATUS SmbiosSpoofer::ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGI
     }
 
     switch (Header->Type) {
-    case SMBIOS_TYPE_BIOS:
-        EgidaLogDebug("Processing BIOS Information (Type 0)");
-        return ProcessBiosInfo(reinterpret_cast<PSMBIOS_BIOS_INFO>(Header), Context);
+    //case SMBIOS_TYPE_BIOS:
+    //    EgidaLogDebug("Processing BIOS Information (Type 0)");
+    //    return ProcessBiosInfo(reinterpret_cast<PSMBIOS_BIOS_INFO>(Header), Context);
 
     case SMBIOS_TYPE_SYSTEM:
         EgidaLogDebug("Processing System Information (Type 1)");
