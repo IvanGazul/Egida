@@ -2,6 +2,7 @@
 #include "../Utils/EgidaUtils.h"
 #include "../Utils/Randomizer.h"
 #include "../Core/Logger.h"
+#include "../Common/Globals.h"
 
 // Static members
 PVOID SmbiosSpoofer::s_NtoskrnlBase = nullptr;
@@ -284,12 +285,9 @@ NTSTATUS SmbiosSpoofer::ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGI
     case SMBIOS_TYPE_MEMORY_DEVICE:
         EgidaLogDebug("Processing Memory Device Information (Type 17)");
         return ProcessMemoryDeviceInfo(reinterpret_cast<PSMBIOS_MEMORY_DEVICE_INFO>(Header), Context);
-
-    default:
-        // Skip unknown types
-        EgidaLogDebug("Skipping SMBIOS table type %d", Header->Type);
-        return EGIDA_SUCCESS;
     }
+
+    return EGIDA_SUCCESS;
 }
 
 NTSTATUS SmbiosSpoofer::ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO BiosInfo, _In_ PEGIDA_CONTEXT Context) {
@@ -675,4 +673,139 @@ NTSTATUS SmbiosSpoofer::ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO 
     }
 
     return EGIDA_SUCCESS;
+}
+
+NTSTATUS SmbiosSpoofer::AllocateAndSetSmbiosString(
+    _In_ PSMBIOS_HEADER Header,
+    _In_ SMBIOS_STRING StringNumber,
+    _In_ PCSTR NewValue,
+    _In_ PEGIDA_CONTEXT Context
+) {
+    if (!Header || !NewValue || !Context) {
+        return EGIDA_FAILED;
+    }
+
+    // Получаем указатель на строку
+    PCHAR existingString = EgidaUtils::GetSmbiosString(Header, StringNumber);
+
+    SIZE_T newValueLength = strlen(NewValue);
+    SIZE_T allocSize = newValueLength + 1;
+
+    if (!existingString) {
+        // Поле null - нужно выделить память
+        EgidaLogDebug("SMBIOS string %d is null, allocating memory (size: %zu)", StringNumber, allocSize);
+
+        PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
+        if (!allocatedString) {
+            EgidaLogError("Failed to allocate SMBIOS string memory");
+            return EGIDA_INSUFFICIENT_RESOURCES;
+        }
+
+        RtlStringCbCopyA(allocatedString, allocSize, NewValue);
+
+        // Добавляем в список отслеживания
+        NTSTATUS status = TrackAllocatedSmbiosString(Context, allocatedString, allocSize, Header, StringNumber);
+        if (!NT_SUCCESS(status)) {
+            EGIDA_FREE(allocatedString);
+            return status;
+        }
+
+        EgidaLogDebug("Allocated and set SMBIOS string: %s", NewValue);
+    }
+    else {
+        // Поле существует - можем изменить на месте
+        SIZE_T existingLength = strlen(existingString);
+
+        if (newValueLength <= existingLength) {
+            // Новая строка помещается в существующее место
+            RtlZeroMemory(existingString, existingLength);
+            RtlStringCbCopyA(existingString, existingLength + 1, NewValue);
+            EgidaLogDebug("Modified existing SMBIOS string: %s", NewValue);
+        }
+        else {
+            // Нужно больше места - выделяем новую память
+            PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
+            if (!allocatedString) {
+                EgidaLogError("Failed to allocate larger SMBIOS string memory");
+                return EGIDA_INSUFFICIENT_RESOURCES;
+            }
+
+            RtlStringCbCopyA(allocatedString, allocSize, NewValue);
+
+            // Очищаем старую строку
+            RtlZeroMemory(existingString, existingLength);
+
+            // Отслеживаем новую выделенную память
+            NTSTATUS status = TrackAllocatedSmbiosString(Context, allocatedString, allocSize, Header, StringNumber);
+            if (!NT_SUCCESS(status)) {
+                EGIDA_FREE(allocatedString);
+                return status;
+            }
+
+            EgidaLogDebug("Allocated larger SMBIOS string: %s", NewValue);
+        }
+    }
+
+    return EGIDA_SUCCESS;
+}
+
+NTSTATUS SmbiosSpoofer::TrackAllocatedSmbiosString(
+    _In_ PEGIDA_CONTEXT Context,
+    _In_ PCHAR StringPointer,
+    _In_ SIZE_T StringSize,
+    _In_ PSMBIOS_HEADER Header,
+    _In_ SMBIOS_STRING StringNumber
+) {
+    // Расширяем массив отслеживания
+    ULONG newCount = Context->SmbiosAllocatedStringCount + 1;
+    PSMBIOS_ALLOCATED_STRING newArray = static_cast<PSMBIOS_ALLOCATED_STRING>(
+        EGIDA_ALLOC_NON_PAGED(newCount * sizeof(SMBIOS_ALLOCATED_STRING))
+        );
+
+    if (!newArray) {
+        return EGIDA_INSUFFICIENT_RESOURCES;
+    }
+
+    // Копируем существующие записи
+    if (Context->SmbiosAllocatedStrings) {
+        RtlCopyMemory(newArray, Context->SmbiosAllocatedStrings,
+            Context->SmbiosAllocatedStringCount * sizeof(SMBIOS_ALLOCATED_STRING));
+        EGIDA_FREE(Context->SmbiosAllocatedStrings);
+    }
+
+    // Добавляем новую запись
+    newArray[Context->SmbiosAllocatedStringCount].StringPointer = StringPointer;
+    newArray[Context->SmbiosAllocatedStringCount].StringSize = StringSize;
+    newArray[Context->SmbiosAllocatedStringCount].OwnerHeader = Header;
+    newArray[Context->SmbiosAllocatedStringCount].StringNumber = StringNumber;
+
+    Context->SmbiosAllocatedStrings = newArray;
+    Context->SmbiosAllocatedStringCount = newCount;
+
+    return EGIDA_SUCCESS;
+}
+
+VOID SmbiosSpoofer::FreeSmbiosAllocatedStrings(_In_ PEGIDA_CONTEXT Context) {
+    if (!Context || !Context->SmbiosAllocatedStrings) {
+        return;
+    }
+
+    EgidaLogDebug("Freeing %lu allocated SMBIOS strings", Context->SmbiosAllocatedStringCount);
+
+    for (ULONG i = 0; i < Context->SmbiosAllocatedStringCount; i++) {
+        if (Context->SmbiosAllocatedStrings[i].StringPointer) {
+            EgidaLogDebug("Freeing SMBIOS string %d (size: %zu)",
+                Context->SmbiosAllocatedStrings[i].StringNumber,
+                Context->SmbiosAllocatedStrings[i].StringSize);
+
+            EGIDA_FREE(Context->SmbiosAllocatedStrings[i].StringPointer);
+            Context->SmbiosAllocatedStrings[i].StringPointer = nullptr;
+        }
+    }
+
+    EGIDA_FREE(Context->SmbiosAllocatedStrings);
+    Context->SmbiosAllocatedStrings = nullptr;
+    Context->SmbiosAllocatedStringCount = 0;
+
+    EgidaLogDebug("SMBIOS string cleanup completed");
 }

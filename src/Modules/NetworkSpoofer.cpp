@@ -2,6 +2,7 @@
 #include "../Utils/EgidaUtils.h"
 #include "../Utils/Randomizer.h"
 #include "../Core/Logger.h"
+#include "../Common/Globals.h"
 
 // Static members
 PVOID NetworkSpoofer::s_NdisBase = nullptr;

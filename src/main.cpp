@@ -1,206 +1,132 @@
-#include "Common/Definitions.h"
+// main.cpp - Updated to work with user mode application
+#include "Core/EgidaCore.h"
+#include "Utils/EgidaUtils.h"
+#include "Core/Logger.h"
+#include "Common/Globals.h"
 
- // Forward declarations
-NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);
-VOID EgidaUnloadDriver(PDRIVER_OBJECT DriverObject);
-NTSTATUS EgidaCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp);
-NTSTATUS EgidaDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+// Global context for IOCTL access - DEFINITION (not declaration)
+PEGIDA_CONTEXT g_EgidaGlobalContext = nullptr;
 
-// Simple logging function
-VOID EgidaLogPrint(PCSTR Format, ...)
-{
-#if EGIDA_ENABLE_LOGGING
-    va_list args;
-    va_start(args, Format);
-    vDbgPrintExWithPrefix("[EGIDA] ", 0, 0, Format, args);
-    va_end(args);
-#else
-    UNREFERENCED_PARAMETER(Format);
-#endif
-}
+extern "C" {
 
-// Global variables
-static PDEVICE_OBJECT g_DeviceObject = NULL;
-static UNICODE_STRING g_DeviceName;
-static UNICODE_STRING g_SymbolicLink;
-static BOOLEAN g_DriverInitialized = FALSE;
+    NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
+        UNREFERENCED_PARAMETER(RegistryPath);
 
-/*
- * Driver Entry Point
- */
-NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
-{
-    NTSTATUS status;
-    PDEVICE_OBJECT deviceObject = NULL;
+        // Initialize logging
+        EgidaLogInitialize();
+        EgidaLogInfo("Egida Driver v%s loading...", EGIDA_VERSION);
 
-    UNREFERENCED_PARAMETER(RegistryPath);
+        // Set driver routines
+        DriverObject->DriverUnload = EgidaUnloadDriver;
+        DriverObject->MajorFunction[IRP_MJ_CREATE] = EgidaCreateClose;
+        DriverObject->MajorFunction[IRP_MJ_CLOSE] = EgidaCreateClose;
+        DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = EgidaDeviceControl;
 
-    EgidaLogPrint("===== Egida Driver v%s =====\n", EGIDA_VERSION);
-    EgidaLogPrint("Starting driver initialization...\n");
+        // Create device
+        PDEVICE_OBJECT deviceObject;
+        UNICODE_STRING deviceName;
+        RtlInitUnicodeString(&deviceName, DEVICE_NAME);
 
-    // Set driver routines
-    DriverObject->DriverUnload = EgidaUnloadDriver;
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = EgidaCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = EgidaCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = EgidaDeviceControl;
+        NTSTATUS status = IoCreateDevice(
+            DriverObject,
+            0, // No device extension needed, we use global context
+            &deviceName,
+            FILE_DEVICE_UNKNOWN,
+            FILE_DEVICE_SECURE_OPEN,
+            FALSE,
+            &deviceObject
+        );
 
-    EgidaLogPrint("Driver routines set successfully\n");
-
-    // Initialize unicode strings
-    RtlInitUnicodeString(&g_DeviceName, DEVICE_NAME);
-    RtlInitUnicodeString(&g_SymbolicLink, SYMBOLIC_LINK);
-
-    // Create device object
-    status = IoCreateDevice(
-        DriverObject,
-        0, // No device extension for now
-        &g_DeviceName,
-        FILE_DEVICE_UNKNOWN,
-        FILE_DEVICE_SECURE_OPEN,
-        FALSE,
-        &deviceObject
-    );
-
-    if (!NT_SUCCESS(status)) {
-        EgidaLogPrint("Failed to create device object: 0x%08X\n", status);
-        return status;
-    }
-
-    g_DeviceObject = deviceObject;
-    EgidaLogPrint("Device object created successfully\n");
-
-    // Create symbolic link
-    status = IoCreateSymbolicLink(&g_SymbolicLink, &g_DeviceName);
-    if (!NT_SUCCESS(status)) {
-        EgidaLogPrint("Failed to create symbolic link: 0x%08X\n", status);
-        IoDeleteDevice(deviceObject);
-        g_DeviceObject = NULL;
-        return status;
-    }
-
-    EgidaLogPrint("Symbolic link created successfully\n");
-
-    // Set device flags
-    deviceObject->Flags |= DO_BUFFERED_IO;
-    deviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-
-    g_DriverInitialized = TRUE;
-
-    EgidaLogPrint("===== Egida Driver loaded successfully =====\n");
-
-    return STATUS_SUCCESS;
-}
-
-/*
- * Driver Unload Routine
- */
-VOID EgidaUnloadDriver(PDRIVER_OBJECT DriverObject)
-{
-    UNREFERENCED_PARAMETER(DriverObject);
-
-    EgidaLogPrint("===== Unloading Egida Driver =====\n");
-
-    if (g_DriverInitialized) {
-        // Delete symbolic link
-        IoDeleteSymbolicLink(&g_SymbolicLink);
-        EgidaLogPrint("Symbolic link deleted\n");
-
-        // Delete device object
-        if (g_DeviceObject) {
-            IoDeleteDevice(g_DeviceObject);
-            g_DeviceObject = NULL;
-            EgidaLogPrint("Device object deleted\n");
+        if (!NT_SUCCESS(status)) {
+            EgidaLogError("Failed to create device: 0x%08X", status);
+            EgidaLogCleanup();
+            return status;
         }
 
-        g_DriverInitialized = FALSE;
+        // Create symbolic link
+        UNICODE_STRING symbolicLink;
+        RtlInitUnicodeString(&symbolicLink, SYMBOLIC_LINK);
+
+        status = IoCreateSymbolicLink(&symbolicLink, &deviceName);
+        if (!NT_SUCCESS(status)) {
+            EgidaLogError("Failed to create symbolic link: 0x%08X", status);
+            IoDeleteDevice(deviceObject);
+            EgidaLogCleanup();
+            return status;
+        }
+
+        // Set device flags for proper access
+        deviceObject->Flags |= DO_BUFFERED_IO;
+        deviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+        // Initialize core
+        status = EgidaCore::Initialize(&g_EgidaGlobalContext);
+        if (!NT_SUCCESS(status)) {
+            EgidaLogError("Failed to initialize core: 0x%08X", status);
+            IoDeleteSymbolicLink(&symbolicLink);
+            IoDeleteDevice(deviceObject);
+            EgidaLogCleanup();
+            return status;
+        }
+
+        // Store device info in context
+        g_EgidaGlobalContext->DeviceObject = deviceObject;
+        RtlInitUnicodeString(&g_EgidaGlobalContext->DeviceName, DEVICE_NAME);
+        RtlInitUnicodeString(&g_EgidaGlobalContext->SymbolicLink, SYMBOLIC_LINK);
+
+        EgidaLogInfo("Egida Driver loaded successfully");
+        EgidaLogInfo("Device: %ws", DEVICE_NAME);
+        EgidaLogInfo("Symbolic Link: %ws", SYMBOLIC_LINK);
+
+        return STATUS_SUCCESS;
     }
 
-    EgidaLogPrint("Driver unloaded successfully\n");
-}
+    VOID EgidaUnloadDriver(_In_ PDRIVER_OBJECT DriverObject) {
+        UNREFERENCED_PARAMETER(DriverObject);
 
-/*
- * Handle Create/Close IRPs
- */
-NTSTATUS EgidaCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
-{
-    PIO_STACK_LOCATION irpSp;
-    NTSTATUS status = STATUS_SUCCESS;
+        EgidaLogInfo("Unloading Egida Driver...");
 
-    UNREFERENCED_PARAMETER(DeviceObject);
+        if (g_EgidaGlobalContext) {
+            // Delete symbolic link first
+            UNICODE_STRING symbolicLink;
+            RtlInitUnicodeString(&symbolicLink, SYMBOLIC_LINK);
+            IoDeleteSymbolicLink(&symbolicLink);
 
-    irpSp = IoGetCurrentIrpStackLocation(Irp);
+            // Delete device
+            if (g_EgidaGlobalContext->DeviceObject) {
+                IoDeleteDevice(g_EgidaGlobalContext->DeviceObject);
+            }
 
-    switch (irpSp->MajorFunction) {
-    case IRP_MJ_CREATE:
-        EgidaLogPrint("Device opened\n");
-        break;
+            // Cleanup core
+            EgidaCore::Cleanup(g_EgidaGlobalContext);
+            g_EgidaGlobalContext = nullptr;
+        }
 
-    case IRP_MJ_CLOSE:
-        EgidaLogPrint("Device closed\n");
-        break;
-
-    default:
-        status = STATUS_INVALID_DEVICE_REQUEST;
-        break;
+        EgidaLogInfo("Egida Driver unloaded successfully");
+        EgidaLogCleanup();
     }
 
-    Irp->IoStatus.Status = status;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    NTSTATUS EgidaCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
+        UNREFERENCED_PARAMETER(DeviceObject);
 
-    return status;
-}
+        PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
 
-/*
- * Handle Device Control IRPs
- */
-NTSTATUS EgidaDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
-{
-    PIO_STACK_LOCATION irpSp;
-    NTSTATUS status = STATUS_SUCCESS;
-    ULONG bytesReturned = 0;
-    ULONG ioControlCode;
+        if (irpSp->MajorFunction == IRP_MJ_CREATE) {
+            EgidaLogDebug("Device opened by process");
+        }
+        else if (irpSp->MajorFunction == IRP_MJ_CLOSE) {
+            EgidaLogDebug("Device closed by process");
+        }
 
-    UNREFERENCED_PARAMETER(DeviceObject);
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-    irpSp = IoGetCurrentIrpStackLocation(Irp);
-    ioControlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
-
-    EgidaLogPrint("Device control request: 0x%08X\n", ioControlCode);
-
-    // Define IOCTL codes
-    #define IOCTL_EGIDA_START_SPOOF    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    #define IOCTL_EGIDA_STOP_SPOOF     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    #define IOCTL_EGIDA_GET_STATUS     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-
-    switch (ioControlCode) {
-    case IOCTL_EGIDA_START_SPOOF:
-        EgidaLogPrint("Received START_SPOOF command\n");
-        // TODO: Implement spoofing logic
-        status = STATUS_SUCCESS;
-        break;
-
-    case IOCTL_EGIDA_STOP_SPOOF:
-        EgidaLogPrint("Received STOP_SPOOF command\n");
-        // TODO: Implement stop spoofing logic
-        status = STATUS_SUCCESS;
-        break;
-
-    case IOCTL_EGIDA_GET_STATUS:
-        EgidaLogPrint("Received GET_STATUS command\n");
-        // TODO: Return driver status
-        status = STATUS_SUCCESS;
-        break;
-
-    default:
-        EgidaLogPrint("Unknown IOCTL: 0x%08X\n", ioControlCode);
-        status = STATUS_INVALID_DEVICE_REQUEST;
-        break;
+        return STATUS_SUCCESS;
     }
 
-    Irp->IoStatus.Status = status;
-    Irp->IoStatus.Information = bytesReturned;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
+        return EgidaCore::HandleDeviceControl(DeviceObject, Irp);
+    }
 
-    return status;
-}
+} // extern "C"

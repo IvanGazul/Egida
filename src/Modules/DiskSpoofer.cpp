@@ -2,6 +2,7 @@
 #include "../Utils/EgidaUtils.h"
 #include "../Utils/Randomizer.h"
 #include "../Core/Logger.h"
+#include "../Common/Globals.h"
 
 extern "C" POBJECT_TYPE* IoDriverObjectType;
 
@@ -11,7 +12,9 @@ PVOID DiskSpoofer::s_DiskBase = nullptr;
 RaidUnitRegisterInterfaces DiskSpoofer::s_RaidUnitRegisterInterfaces = nullptr;
 DiskEnableDisableFailurePrediction DiskSpoofer::s_DiskEnableDisableFailurePrediction = nullptr;
 
-NTSTATUS DiskSpoofer::Initialize(_In_ PEGIDA_CONTEXT Context) {
+NTSTATUS DiskSpoofer::Initialize(
+    _In_ PEGIDA_CONTEXT Context
+) {
     UNREFERENCED_PARAMETER(Context);
 
     EgidaLogInfo("Initializing Disk Spoofer...");
@@ -68,7 +71,9 @@ NTSTATUS DiskSpoofer::Initialize(_In_ PEGIDA_CONTEXT Context) {
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS DiskSpoofer::ExecuteSpoof(_In_ PEGIDA_CONTEXT Context) {
+NTSTATUS DiskSpoofer::ExecuteSpoof(
+    _In_ PEGIDA_CONTEXT Context
+) {
     if (!Context) {
         EgidaLogError("Invalid context");
         return EGIDA_FAILED;
@@ -80,6 +85,9 @@ NTSTATUS DiskSpoofer::ExecuteSpoof(_In_ PEGIDA_CONTEXT Context) {
     }
 
     EgidaLogInfo("Executing disk spoofing...");
+
+    // Освобождаем ранее выделенную память перед новым спуфингом
+    FreeDiskAllocatedStrings(Context);
 
     // Initialize randomizer
     EgidaRandomizer::InitializeSeed(Context->Config.RandomConfig.RandomSeed);
@@ -104,7 +112,14 @@ NTSTATUS DiskSpoofer::ExecuteSpoof(_In_ PEGIDA_CONTEXT Context) {
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS DiskSpoofer::ChangeDiskSerials(_In_ PEGIDA_CONTEXT Context) {
+NTSTATUS DiskSpoofer::ChangeDiskSerials(
+    _In_ PEGIDA_CONTEXT Context
+) {
+    EgidaLogInfo("Starting disk serial modification...");
+    
+	//Free previously allocated strings
+    FreeDiskAllocatedStrings(Context);
+
     NTSTATUS overallStatus = EGIDA_NOT_FOUND;
 
     // Try to find RAID ports
@@ -135,7 +150,9 @@ NTSTATUS DiskSpoofer::ChangeDiskSerials(_In_ PEGIDA_CONTEXT Context) {
     return overallStatus;
 }
 
-PDEVICE_OBJECT DiskSpoofer::GetRaidDevice(_In_ PCWSTR DeviceName) {
+PDEVICE_OBJECT DiskSpoofer::GetRaidDevice(
+    _In_ PCWSTR DeviceName
+) {
     UNICODE_STRING deviceName;
     RtlInitUnicodeString(&deviceName, DeviceName);
 
@@ -162,7 +179,10 @@ PDEVICE_OBJECT DiskSpoofer::GetRaidDevice(_In_ PCWSTR DeviceName) {
     return targetDevice;
 }
 
-NTSTATUS DiskSpoofer::ProcessRaidDevices(_In_ PDEVICE_OBJECT DeviceArray, _In_ PEGIDA_CONTEXT Context) {
+NTSTATUS DiskSpoofer::ProcessRaidDevices(
+    _In_ PDEVICE_OBJECT DeviceArray, 
+    _In_ PEGIDA_CONTEXT Context
+) {
     NTSTATUS status = EGIDA_NOT_FOUND;
 
     PDEVICE_OBJECT currentDevice = DeviceArray;
@@ -173,43 +193,9 @@ NTSTATUS DiskSpoofer::ProcessRaidDevices(_In_ PDEVICE_OBJECT DeviceArray, _In_ P
                 PRAID_UNIT_EXTENSION extension = static_cast<PRAID_UNIT_EXTENSION>(currentDevice->DeviceExtension);
 
                 if (extension && EgidaUtils::IsValidKernelPointer(extension)) {
-                    // Get current serial
-                    ULONG serialLength = extension->_Identity.Identity.SerialNumber.Length;
-                    if (serialLength > 0 && serialLength < EGIDA_MAX_SERIAL_LENGTH) {
-
-                        CHAR originalSerial[EGIDA_MAX_SERIAL_LENGTH];
-                        RtlZeroMemory(originalSerial, sizeof(originalSerial));
-
-                        if (extension->_Identity.Identity.SerialNumber.Buffer) {
-                            RtlCopyMemory(originalSerial, extension->_Identity.Identity.SerialNumber.Buffer, serialLength);
-                            originalSerial[serialLength] = '\0';
-
-                            EgidaLogDebug("Original disk serial: %s", originalSerial);
-
-                            // Generate new serial
-                            PCHAR newSerial = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(serialLength + 1));
-                            if (newSerial) {
-                                EgidaRandomizer::GenerateRandomSerial(newSerial, serialLength);
-                                newSerial[serialLength] = '\0';
-
-                                // Update the serial
-                                RtlInitString(&extension->_Identity.Identity.SerialNumber, newSerial);
-
-                                EgidaLogInfo("Changed disk serial from %s to %s", originalSerial, newSerial);
-
-                                // Disable SMART for this device
-                                DisableSmartBit(extension);
-
-                                // Register interfaces to update registry
-                                if (s_RaidUnitRegisterInterfaces) {
-                                    s_RaidUnitRegisterInterfaces(extension);
-                                }
-
-                                status = EGIDA_SUCCESS;
-
-                                // Don't free newSerial as it's now owned by the system
-                            }
-                        }
+                    status = ProcessSingleDiskDevice(extension, Context);
+                    if (NT_SUCCESS(status)) {
+                        EgidaLogInfo("Successfully processed disk device");
                     }
                 }
             }
@@ -225,7 +211,202 @@ NTSTATUS DiskSpoofer::ProcessRaidDevices(_In_ PDEVICE_OBJECT DeviceArray, _In_ P
     return status;
 }
 
-NTSTATUS DiskSpoofer::DisableSmartOnAllDisks(_In_ PEGIDA_CONTEXT Context) {
+NTSTATUS DiskSpoofer::ProcessSingleDiskDevice(
+    _In_ PRAID_UNIT_EXTENSION Extension, 
+    _In_ PEGIDA_CONTEXT Context
+) {
+    if (!Extension || !Context) {
+        return EGIDA_FAILED;
+    }
+
+    NTSTATUS status = EGIDA_SUCCESS;
+
+    // Обработка Serial Number
+    PSTRING serialString = &Extension->_Identity.Identity.SerialNumber;
+    if (Context->Config.RandomConfig.RandomizeSerials) {
+        if (serialString->Buffer && serialString->Length > 0) {
+            // Существующий серийник - изменяем на месте или выделяем новую память
+            CHAR originalSerial[EGIDA_MAX_SERIAL_LENGTH];
+            RtlZeroMemory(originalSerial, sizeof(originalSerial));
+
+            ULONG copyLength = min(serialString->Length, sizeof(originalSerial) - 1);
+            RtlCopyMemory(originalSerial, serialString->Buffer, copyLength);
+            originalSerial[copyLength] = '\0';
+
+            EgidaLogDebug("Original disk serial: %s", originalSerial);
+
+            // Генерируем новый серийник
+            CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
+            EgidaRandomizer::GenerateRandomSerial(newSerial, sizeof(newSerial));
+
+            // Проверяем, помещается ли новый серийник в существующий буфер
+            SIZE_T newSerialLength = strlen(newSerial);
+            if (newSerialLength <= serialString->MaximumLength) {
+                // Помещается - изменяем на месте
+                RtlZeroMemory(serialString->Buffer, serialString->MaximumLength);
+                RtlCopyMemory(serialString->Buffer, newSerial, newSerialLength);
+                serialString->Length = static_cast<USHORT>(newSerialLength);
+
+                EgidaLogInfo("Updated disk serial in-place: %s -> %s", originalSerial, newSerial);
+            }
+            else {
+                // Не помещается - выделяем новую память
+                status = AllocateAndSetDiskString(Extension, serialString, newSerial, Context, DISK_STRING_SERIAL);
+                if (NT_SUCCESS(status)) {
+                    EgidaLogInfo("Allocated new disk serial: %s -> %s", originalSerial, newSerial);
+                }
+            }
+        }
+        else {
+            // Серийник null или пустой - выделяем новую память
+            CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
+            EgidaRandomizer::GenerateRandomSerial(newSerial, sizeof(newSerial));
+
+            status = AllocateAndSetDiskString(Extension, serialString, newSerial, Context, DISK_STRING_SERIAL);
+            if (NT_SUCCESS(status)) {
+                EgidaLogInfo("Allocated disk serial for null field: %s", newSerial);
+            }
+        }
+    }
+
+    // Disable SMART for this device
+    if (NT_SUCCESS(status)) {
+        DisableSmartBit(Extension);
+
+        // Register interfaces to update registry
+        if (s_RaidUnitRegisterInterfaces) {
+            s_RaidUnitRegisterInterfaces(Extension);
+        }
+    }
+
+    return status;
+}
+
+NTSTATUS DiskSpoofer::AllocateAndSetDiskString(
+    _In_ PRAID_UNIT_EXTENSION Extension,
+    _In_ PSTRING TargetString,
+    _In_ PCSTR NewValue,
+    _In_ PEGIDA_CONTEXT Context,
+    _In_ ULONG StringType
+) {
+    if (!Extension || !TargetString || !NewValue || !Context) {
+        return EGIDA_FAILED;
+    }
+
+    SIZE_T newValueLength = strlen(NewValue);
+    SIZE_T allocSize = newValueLength + 1;
+
+    // Выделяем память для новой строки
+    PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
+    if (!allocatedString) {
+        EgidaLogError("Failed to allocate disk string memory (size: %zu)", allocSize);
+        return EGIDA_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlStringCbCopyA(allocatedString, allocSize, NewValue);
+
+    // Обновляем STRING структуру
+    TargetString->Buffer = allocatedString;
+    TargetString->Length = static_cast<USHORT>(newValueLength);
+    TargetString->MaximumLength = static_cast<USHORT>(allocSize);
+
+    // Отслеживаем выделенную память
+    NTSTATUS status = TrackAllocatedDiskString(Context, allocatedString, allocSize, Extension, StringType);
+    if (!NT_SUCCESS(status)) {
+        EGIDA_FREE(allocatedString);
+        TargetString->Buffer = nullptr;
+        TargetString->Length = 0;
+        TargetString->MaximumLength = 0;
+        return status;
+    }
+
+    EgidaLogDebug("Allocated and set disk string (type %lu): %s", StringType, NewValue);
+    return EGIDA_SUCCESS;
+}
+
+NTSTATUS DiskSpoofer::TrackAllocatedDiskString(
+    _In_ PEGIDA_CONTEXT Context,
+    _In_ PCHAR StringPointer,
+    _In_ SIZE_T StringSize,
+    _In_ PRAID_UNIT_EXTENSION Extension,
+    _In_ ULONG StringType
+) {
+    // Расширяем массив отслеживания
+    ULONG newCount = Context->DiskAllocatedStringCount + 1;
+    PDISK_ALLOCATED_STRING newArray = static_cast<PDISK_ALLOCATED_STRING>(
+        EGIDA_ALLOC_NON_PAGED(newCount * sizeof(DISK_ALLOCATED_STRING))
+        );
+
+    if (!newArray) {
+        return EGIDA_INSUFFICIENT_RESOURCES;
+    }
+
+    // Копируем существующие записи
+    if (Context->DiskAllocatedStrings) {
+        RtlCopyMemory(newArray, Context->DiskAllocatedStrings,
+            Context->DiskAllocatedStringCount * sizeof(DISK_ALLOCATED_STRING));
+        EGIDA_FREE(Context->DiskAllocatedStrings);
+    }
+
+    // Добавляем новую запись
+    newArray[Context->DiskAllocatedStringCount].StringPointer = StringPointer;
+    newArray[Context->DiskAllocatedStringCount].StringSize = StringSize;
+    newArray[Context->DiskAllocatedStringCount].OwnerExtension = Extension;
+    newArray[Context->DiskAllocatedStringCount].StringType = StringType;
+
+    Context->DiskAllocatedStrings = newArray;
+    Context->DiskAllocatedStringCount = newCount;
+
+    return EGIDA_SUCCESS;
+}
+
+VOID DiskSpoofer::FreeDiskAllocatedStrings(
+    _In_ PEGIDA_CONTEXT Context
+) {
+    if (!Context || !Context->DiskAllocatedStrings) {
+        return;
+    }
+
+    EgidaLogDebug("Freeing %lu allocated disk strings", Context->DiskAllocatedStringCount);
+
+    for (ULONG i = 0; i < Context->DiskAllocatedStringCount; i++) {
+        if (Context->DiskAllocatedStrings[i].StringPointer) {
+            EgidaLogDebug("Freeing disk string type %d (size: %zu)",
+                Context->DiskAllocatedStrings[i].StringType,
+                Context->DiskAllocatedStrings[i].StringSize);
+
+            // Обнуляем ссылку в оригинальной структуре если возможно
+            __try {
+                PRAID_UNIT_EXTENSION ext = Context->DiskAllocatedStrings[i].OwnerExtension;
+                if (ext && EgidaUtils::IsValidKernelPointer(ext)) {
+                    if (Context->DiskAllocatedStrings[i].StringType == DISK_STRING_SERIAL) {
+                        if (ext->_Identity.Identity.SerialNumber.Buffer == Context->DiskAllocatedStrings[i].StringPointer) {
+                            ext->_Identity.Identity.SerialNumber.Buffer = nullptr;
+                            ext->_Identity.Identity.SerialNumber.Length = 0;
+                            ext->_Identity.Identity.SerialNumber.MaximumLength = 0;
+                        }
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                EgidaLogWarning("Exception while clearing disk string reference");
+            }
+
+            EGIDA_FREE(Context->DiskAllocatedStrings[i].StringPointer);
+            Context->DiskAllocatedStrings[i].StringPointer = nullptr;
+        }
+    }
+
+    EGIDA_FREE(Context->DiskAllocatedStrings);
+    Context->DiskAllocatedStrings = nullptr;
+    Context->DiskAllocatedStringCount = 0;
+
+    EgidaLogDebug("Disk string cleanup completed");
+}
+
+NTSTATUS DiskSpoofer::DisableSmartOnAllDisks(
+    _In_ PEGIDA_CONTEXT Context
+) {
     UNREFERENCED_PARAMETER(Context);
 
     EgidaLogInfo("Disabling SMART on all disks...");
@@ -293,7 +474,9 @@ NTSTATUS DiskSpoofer::DisableSmartOnAllDisks(_In_ PEGIDA_CONTEXT Context) {
     return EGIDA_SUCCESS;
 }
 
-VOID DiskSpoofer::DisableSmartBit(_In_ PRAID_UNIT_EXTENSION Extension) {
+VOID DiskSpoofer::DisableSmartBit(
+    _In_ PRAID_UNIT_EXTENSION Extension
+) {
     if (!Extension) return;
 
     __try {
@@ -305,7 +488,9 @@ VOID DiskSpoofer::DisableSmartBit(_In_ PRAID_UNIT_EXTENSION Extension) {
     }
 }
 
-NTSTATUS DiskSpoofer::StopSpoof(_In_ PEGIDA_CONTEXT Context) {
+NTSTATUS DiskSpoofer::StopSpoof(
+    _In_ PEGIDA_CONTEXT Context
+) {
     UNREFERENCED_PARAMETER(Context);
 
     EgidaLogInfo("Stopping disk spoofing...");
@@ -313,7 +498,9 @@ NTSTATUS DiskSpoofer::StopSpoof(_In_ PEGIDA_CONTEXT Context) {
     return EGIDA_SUCCESS;
 }
 
-VOID DiskSpoofer::Cleanup(_In_ PEGIDA_CONTEXT Context) {
+VOID DiskSpoofer::Cleanup(
+    _In_ PEGIDA_CONTEXT Context
+) {
     UNREFERENCED_PARAMETER(Context);
 
     EgidaLogInfo("Cleaning up Disk Spoofer...");

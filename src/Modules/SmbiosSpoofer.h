@@ -22,6 +22,20 @@ private:
     static NTSTATUS FindSmbiosTables(_In_ PEGIDA_CONTEXT Context);
     static NTSTATUS ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGIDA_CONTEXT Context);
     static NTSTATUS LoopSmbiosTables(_In_ PVOID MappedBase, _In_ ULONG TableSize, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS AllocateAndSetSmbiosString(
+        _In_ PSMBIOS_HEADER Header,
+        _In_ SMBIOS_STRING StringNumber,
+        _In_ PCSTR NewValue,
+        _In_ PEGIDA_CONTEXT Context
+    );
+    static VOID FreeSmbiosAllocatedStrings(_In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS TrackAllocatedSmbiosString(
+        _In_ PEGIDA_CONTEXT Context,
+        _In_ PCHAR StringPointer,
+        _In_ SIZE_T StringSize,
+        _In_ PSMBIOS_HEADER Header,
+        _In_ SMBIOS_STRING StringNumber
+    );
 
     // Individual table processors
     static NTSTATUS ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO BiosInfo, _In_ PEGIDA_CONTEXT Context);

@@ -2,10 +2,12 @@
 #include "../Modules/SmbiosSpoofer.h"
 #include "../Modules/DiskSpoofer.h"
 #include "../Modules/NetworkSpoofer.h"
+#include "../Modules/GpuSpoofer.h"
 #include "../Utils/EgidaUtils.h"
+#include "../Core/Logger.h"
+#include "../Common/Globals.h"
 
-// Global context
-PEGIDA_CONTEXT g_EgidaGlobalContext = nullptr;
+// Static context for EgidaCore class
 PEGIDA_CONTEXT EgidaCore::g_EgidaContext = nullptr;
 
 NTSTATUS EgidaCore::Initialize(_Out_ PEGIDA_CONTEXT* Context) {
@@ -82,16 +84,6 @@ NTSTATUS EgidaCore::Cleanup(_In_ PEGIDA_CONTEXT Context) {
     // Cleanup modules
     CleanupModules(Context);
 
-    // Cleanup device objects
-    if (Context->DeviceObject) {
-        if (Context->SymbolicLink.Buffer) {
-            IoDeleteSymbolicLink(&Context->SymbolicLink);
-            RtlFreeUnicodeString(&Context->SymbolicLink);
-        }
-
-        IoDeleteDevice(Context->DeviceObject);
-    }
-
     // Free context
     EGIDA_FREE(Context);
     g_EgidaContext = nullptr;
@@ -145,6 +137,16 @@ NTSTATUS EgidaCore::StartSpoofing(_In_ PEGIDA_CONTEXT Context) {
         }
     }
 
+    // GPU Spoofing
+    if (Context->Config.Flags & EGIDA_SPOOF_GPU) {
+        EgidaLogInfo("Starting GPU spoofing...");
+        status = GpuSpoofer::ExecuteSpoof(Context);
+        if (!NT_SUCCESS(status)) {
+            EgidaLogError("GPU spoofing failed: 0x%08X", status);
+            return status;
+        }
+    }
+
     Context->IsSpoofingActive = TRUE;
     EgidaLogInfo("HWID spoofing started successfully");
 
@@ -163,6 +165,10 @@ NTSTATUS EgidaCore::StopSpoofing(_In_ PEGIDA_CONTEXT Context) {
     EgidaLogInfo("Stopping HWID spoofing...");
 
     // Stop individual modules
+    if (Context->Config.Flags & EGIDA_SPOOF_GPU) {
+        GpuSpoofer::StopSpoof(Context);
+    }
+
     if (Context->Config.EnableNetworkSpoof) {
         NetworkSpoofer::StopSpoof(Context);
     }
@@ -179,6 +185,59 @@ NTSTATUS EgidaCore::StopSpoofing(_In_ PEGIDA_CONTEXT Context) {
     EgidaLogInfo("HWID spoofing stopped");
 
     return EGIDA_SUCCESS;
+}
+
+// NEW: GPU-specific control methods
+NTSTATUS EgidaCore::StartGPUSpoofing(_In_ PEGIDA_CONTEXT Context) {
+    if (!Context || !Context->IsInitialized) {
+        EgidaLogError("Context not initialized");
+        return EGIDA_FAILED;
+    }
+
+    EgidaLogInfo("Starting GPU spoofing only...");
+
+    // Enable GPU spoofing flag
+    Context->Config.Flags |= EGIDA_SPOOF_GPU;
+
+    NTSTATUS status = GpuSpoofer::ExecuteSpoof(Context);
+    if (!NT_SUCCESS(status)) {
+        EgidaLogError("GPU spoofing failed: 0x%08X", status);
+        return status;
+    }
+
+    EgidaLogInfo("GPU spoofing started successfully");
+    return EGIDA_SUCCESS;
+}
+
+NTSTATUS EgidaCore::StopGPUSpoofing(_In_ PEGIDA_CONTEXT Context) {
+    if (!Context) {
+        return EGIDA_FAILED;
+    }
+
+    EgidaLogInfo("Stopping GPU spoofing...");
+
+    NTSTATUS status = GpuSpoofer::StopSpoof(Context);
+    if (NT_SUCCESS(status)) {
+        Context->Config.Flags &= ~EGIDA_SPOOF_GPU;
+        EgidaLogInfo("GPU spoofing stopped");
+    }
+
+    return status;
+}
+
+NTSTATUS EgidaCore::GetGPUStatus(_In_ PEGIDA_CONTEXT Context, _Out_ PEGIDA_STATUS Status) {
+    if (!Context || !Status) {
+        return EGIDA_FAILED;
+    }
+
+    // Use the regular GetStatus but focus on GPU info
+    NTSTATUS status = GetStatus(Context, Status);
+    if (NT_SUCCESS(status)) {
+        // Additional GPU-specific status info could be added here
+        EgidaLogDebug("GPU status: %s", (Status->SpoofedComponents & EGIDA_SPOOF_GPU) ? "Active" : "Inactive");
+    }
+
+    return status;
 }
 
 NTSTATUS EgidaCore::InitializeModules(_In_ PEGIDA_CONTEXT Context) {
@@ -205,10 +264,21 @@ NTSTATUS EgidaCore::InitializeModules(_In_ PEGIDA_CONTEXT Context) {
         return status;
     }
 
+    // Initialize GPU Spoofer
+    status = GpuSpoofer::Initialize(Context);
+    if (!NT_SUCCESS(status)) {
+        EgidaLogError("Failed to initialize GPU spoofer: 0x%08X", status);
+        return status;
+    }
+
     return EGIDA_SUCCESS;
 }
 
 VOID EgidaCore::CleanupModules(_In_ PEGIDA_CONTEXT Context) {
+    if (Context->Config.Flags & EGIDA_SPOOF_GPU) {
+        GpuSpoofer::Cleanup(Context);
+    }
+
     if (Context->Config.EnableSmbiosSpoof) {
         SmbiosSpoofer::Cleanup(Context);
     }
@@ -232,16 +302,21 @@ NTSTATUS EgidaCore::HandleDeviceControl(
     NTSTATUS status = EGIDA_SUCCESS;
     ULONG bytesReturned = 0;
 
+    EgidaLogDebug("Received IOCTL: 0x%08X", irpSp->Parameters.DeviceIoControl.IoControlCode);
+
     switch (irpSp->Parameters.DeviceIoControl.IoControlCode) {
     case IOCTL_EGIDA_START_SPOOF:
+        EgidaLogInfo("Processing START_SPOOF command");
         status = StartSpoofing(g_EgidaGlobalContext);
         break;
 
     case IOCTL_EGIDA_STOP_SPOOF:
+        EgidaLogInfo("Processing STOP_SPOOF command");
         status = StopSpoofing(g_EgidaGlobalContext);
         break;
 
     case IOCTL_EGIDA_GET_STATUS:
+        EgidaLogDebug("Processing GET_STATUS command");
         if (irpSp->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(EGIDA_STATUS)) {
             PEGIDA_STATUS statusInfo = static_cast<PEGIDA_STATUS>(Irp->AssociatedIrp.SystemBuffer);
             status = GetStatus(g_EgidaGlobalContext, statusInfo);
@@ -251,23 +326,54 @@ NTSTATUS EgidaCore::HandleDeviceControl(
         }
         else {
             status = STATUS_BUFFER_TOO_SMALL;
+            EgidaLogError("Buffer too small for status structure");
         }
         break;
 
     case IOCTL_EGIDA_SET_CONFIG:
+        EgidaLogInfo("Processing SET_CONFIG command");
         if (irpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(SPOOF_CONFIGURATION)) {
             PSPOOF_CONFIGURATION config = static_cast<PSPOOF_CONFIGURATION>(Irp->AssociatedIrp.SystemBuffer);
             status = SetConfiguration(g_EgidaGlobalContext, config);
         }
         else {
             status = STATUS_BUFFER_TOO_SMALL;
+            EgidaLogError("Buffer too small for configuration structure");
+        }
+        break;
+
+    case IOCTL_EGIDA_START_GPU_SPOOF:
+        EgidaLogInfo("Processing START_GPU_SPOOF command");
+        status = StartGPUSpoofing(g_EgidaGlobalContext);
+        break;
+
+    case IOCTL_EGIDA_STOP_GPU_SPOOF:
+        EgidaLogInfo("Processing STOP_GPU_SPOOF command");
+        status = StopGPUSpoofing(g_EgidaGlobalContext);
+        break;
+
+    case IOCTL_EGIDA_GET_GPU_STATUS:
+        EgidaLogDebug("Processing GET_GPU_STATUS command");
+        if (irpSp->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(EGIDA_STATUS)) {
+            PEGIDA_STATUS statusInfo = static_cast<PEGIDA_STATUS>(Irp->AssociatedIrp.SystemBuffer);
+            status = GetGPUStatus(g_EgidaGlobalContext, statusInfo);
+            if (NT_SUCCESS(status)) {
+                bytesReturned = sizeof(EGIDA_STATUS);
+            }
+        }
+        else {
+            status = STATUS_BUFFER_TOO_SMALL;
+            EgidaLogError("Buffer too small for GPU status structure");
         }
         break;
 
     default:
+        EgidaLogWarning("Unknown IOCTL code: 0x%08X", irpSp->Parameters.DeviceIoControl.IoControlCode);
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }
+
+    EgidaLogDebug("IOCTL completed with status: 0x%08X, bytes returned: %lu", status, bytesReturned);
 
     Irp->IoStatus.Status = status;
     Irp->IoStatus.Information = bytesReturned;
@@ -276,111 +382,35 @@ NTSTATUS EgidaCore::HandleDeviceControl(
     return status;
 }
 
-// Driver entry points implementation
-extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
-    UNREFERENCED_PARAMETER(RegistryPath);
-
-    EgidaLogInitialize();
-    EgidaLogInfo("Egida Driver v%s loading...", EGIDA_VERSION);
-
-    // Set driver routines
-    DriverObject->DriverUnload = EgidaUnloadDriver;
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = EgidaCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = EgidaCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = EgidaDeviceControl;
-
-    // Create device
-    PDEVICE_OBJECT deviceObject;
-    UNICODE_STRING deviceName;
-    RtlInitUnicodeString(&deviceName, DEVICE_NAME);
-
-    NTSTATUS status = IoCreateDevice(
-        DriverObject,
-        sizeof(EGIDA_CONTEXT),
-        &deviceName,
-        FILE_DEVICE_UNKNOWN,
-        FILE_DEVICE_SECURE_OPEN,
-        FALSE,
-        &deviceObject
-    );
-
-    if (!NT_SUCCESS(status)) {
-        EgidaLogError("Failed to create device: 0x%08X", status);
-        return status;
-    }
-
-    // Create symbolic link
-    UNICODE_STRING symbolicLink;
-    RtlInitUnicodeString(&symbolicLink, SYMBOLIC_LINK);
-
-    status = IoCreateSymbolicLink(&symbolicLink, &deviceName);
-    if (!NT_SUCCESS(status)) {
-        EgidaLogError("Failed to create symbolic link: 0x%08X", status);
-        IoDeleteDevice(deviceObject);
-        return status;
-    }
-
-    // Initialize core
-    status = EgidaCore::Initialize(&g_EgidaGlobalContext);
-    if (!NT_SUCCESS(status)) {
-        EgidaLogError("Failed to initialize core: 0x%08X", status);
-        IoDeleteSymbolicLink(&symbolicLink);
-        IoDeleteDevice(deviceObject);
-        return status;
-    }
-
-    g_EgidaGlobalContext->DeviceObject = deviceObject;
-    deviceObject->DeviceExtension = g_EgidaGlobalContext;
-
-    EgidaLogInfo("Egida Driver loaded successfully");
-    return EGIDA_SUCCESS;
-}
-
-extern "C" VOID EgidaUnloadDriver(_In_ PDRIVER_OBJECT DriverObject) {
-    UNREFERENCED_PARAMETER(DriverObject);
-
-    EgidaLogInfo("Unloading Egida Driver...");
-
-    if (g_EgidaGlobalContext) {
-        EgidaCore::Cleanup(g_EgidaGlobalContext);
-        g_EgidaGlobalContext = nullptr;
-    }
-
-    EgidaLogCleanup();
-}
-
-extern "C" NTSTATUS EgidaCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
-    UNREFERENCED_PARAMETER(DeviceObject);
-
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-    return STATUS_SUCCESS;
-}
-
-extern "C" NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
-    return EgidaCore::HandleDeviceControl(DeviceObject, Irp);
-}
-
 NTSTATUS EgidaCore::SetConfiguration(_In_ PEGIDA_CONTEXT Context, _In_ PSPOOF_CONFIGURATION Config) {
     if (!Context || !Config) {
+        EgidaLogError("Invalid parameters for SetConfiguration");
         return EGIDA_FAILED;
     }
+
+    EgidaLogInfo("Updating configuration...");
+    EgidaLogDebug("Flags: 0x%08X", Config->Flags);
+    EgidaLogDebug("SMBIOS: %s", Config->EnableSmbiosSpoof ? "Enabled" : "Disabled");
+    EgidaLogDebug("Disk: %s", Config->EnableDiskSpoof ? "Enabled" : "Disabled");
+    EgidaLogDebug("Network: %s", Config->EnableNetworkSpoof ? "Enabled" : "Disabled");
+    EgidaLogDebug("Boot Info: %s", Config->EnableBootInfoSpoof ? "Enabled" : "Disabled");
+    EgidaLogDebug("Random Seed: %lu", Config->RandomConfig.RandomSeed);
 
     KIRQL oldIrql;
     KeAcquireSpinLock(&Context->SpinLock, &oldIrql);
 
+    // Copy configuration
     RtlCopyMemory(&Context->Config, Config, sizeof(SPOOF_CONFIGURATION));
 
     KeReleaseSpinLock(&Context->SpinLock, oldIrql);
 
-    EgidaLogInfo("Configuration updated");
+    EgidaLogInfo("Configuration updated successfully");
     return EGIDA_SUCCESS;
 }
 
 NTSTATUS EgidaCore::GetStatus(_In_ PEGIDA_CONTEXT Context, _Out_ PEGIDA_STATUS Status) {
     if (!Context || !Status) {
+        EgidaLogError("Invalid parameters for GetStatus");
         return EGIDA_FAILED;
     }
 
@@ -389,11 +419,33 @@ NTSTATUS EgidaCore::GetStatus(_In_ PEGIDA_CONTEXT Context, _Out_ PEGIDA_STATUS S
     Status->IsActive = Context->IsSpoofingActive;
     Status->SpoofedComponents = 0;
 
+    // Determine which components are spoofed
     if (Context->Config.EnableSmbiosSpoof) Status->SpoofedComponents |= EGIDA_SPOOF_SMBIOS;
     if (Context->Config.EnableDiskSpoof) Status->SpoofedComponents |= EGIDA_SPOOF_DISK;
     if (Context->Config.EnableNetworkSpoof) Status->SpoofedComponents |= EGIDA_SPOOF_NETWORK;
+    if (Context->Config.Flags & EGIDA_SPOOF_GPU) Status->SpoofedComponents |= EGIDA_SPOOF_GPU;
 
+    // Memory statistics
+    Status->SmbiosAllocatedCount = Context->SmbiosAllocatedStringCount;
+    Status->DiskAllocatedCount = Context->DiskAllocatedStringCount;
+    Status->AllocatedStringsCount = Status->SmbiosAllocatedCount + Status->DiskAllocatedCount;
+
+    // GPU statistics
+    if (Context->GpuContext) {
+        Status->GpuDevicesCount = Context->GpuContext->DeviceCount;
+    }
+    else {
+        Status->GpuDevicesCount = 0;
+    }
+
+    // Copy version string
     RtlStringCbCopyA(Status->Version, sizeof(Status->Version), EGIDA_VERSION);
+
+    // Last error (for now, always success)
+    Status->LastError = 0;
+
+    EgidaLogDebug("Status retrieved - Active: %s, Components: 0x%08X",
+        Status->IsActive ? "Yes" : "No", Status->SpoofedComponents);
 
     return EGIDA_SUCCESS;
 }
