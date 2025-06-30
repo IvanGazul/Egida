@@ -28,7 +28,6 @@
 #define SMBIOS_TYPE_MEMORY_DEVICE  17
 #define SMBIOS_TYPE_END            127
 
-// Helper macros
 #ifndef ARRAYSIZE
 #define ARRAYSIZE(a) (sizeof(a)/sizeof(a[0]))
 #endif

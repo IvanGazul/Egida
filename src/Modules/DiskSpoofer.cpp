@@ -86,7 +86,7 @@ NTSTATUS DiskSpoofer::ExecuteSpoof(
 
     EgidaLogInfo("Executing disk spoofing...");
 
-    // Освобождаем ранее выделенную память перед новым спуфингом
+	// Free any previously allocated disk strings
     FreeDiskAllocatedStrings(Context);
 
     // Initialize randomizer
@@ -221,11 +221,12 @@ NTSTATUS DiskSpoofer::ProcessSingleDiskDevice(
 
     NTSTATUS status = EGIDA_SUCCESS;
 
-    // Обработка Serial Number
+	// Process disk identity
     PSTRING serialString = &Extension->_Identity.Identity.SerialNumber;
     if (Context->Config.RandomConfig.RandomizeSerials) {
         if (serialString->Buffer && serialString->Length > 0) {
-            // Существующий серийник - изменяем на месте или выделяем новую память
+			
+            // Existing serial - log original
             CHAR originalSerial[EGIDA_MAX_SERIAL_LENGTH];
             RtlZeroMemory(originalSerial, sizeof(originalSerial));
 
@@ -235,14 +236,14 @@ NTSTATUS DiskSpoofer::ProcessSingleDiskDevice(
 
             EgidaLogDebug("Original disk serial: %s", originalSerial);
 
-            // Генерируем новый серийник
+			// Generate new random serial
             CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
             EgidaRandomizer::GenerateRandomSerial(newSerial, sizeof(newSerial));
 
-            // Проверяем, помещается ли новый серийник в существующий буфер
+			// Check if new serial fits in existing buffer
             SIZE_T newSerialLength = strlen(newSerial);
             if (newSerialLength <= serialString->MaximumLength) {
-                // Помещается - изменяем на месте
+				// Fits in existing buffer - update in-place
                 RtlZeroMemory(serialString->Buffer, serialString->MaximumLength);
                 RtlCopyMemory(serialString->Buffer, newSerial, newSerialLength);
                 serialString->Length = static_cast<USHORT>(newSerialLength);
@@ -250,7 +251,7 @@ NTSTATUS DiskSpoofer::ProcessSingleDiskDevice(
                 EgidaLogInfo("Updated disk serial in-place: %s -> %s", originalSerial, newSerial);
             }
             else {
-                // Не помещается - выделяем новую память
+				// Not enough space - allocate new memory
                 status = AllocateAndSetDiskString(Extension, serialString, newSerial, Context, DISK_STRING_SERIAL);
                 if (NT_SUCCESS(status)) {
                     EgidaLogInfo("Allocated new disk serial: %s -> %s", originalSerial, newSerial);
@@ -258,7 +259,7 @@ NTSTATUS DiskSpoofer::ProcessSingleDiskDevice(
             }
         }
         else {
-            // Серийник null или пустой - выделяем новую память
+            //Null serial
             CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
             EgidaRandomizer::GenerateRandomSerial(newSerial, sizeof(newSerial));
 
@@ -296,7 +297,6 @@ NTSTATUS DiskSpoofer::AllocateAndSetDiskString(
     SIZE_T newValueLength = strlen(NewValue);
     SIZE_T allocSize = newValueLength + 1;
 
-    // Выделяем память для новой строки
     PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
     if (!allocatedString) {
         EgidaLogError("Failed to allocate disk string memory (size: %zu)", allocSize);
@@ -305,12 +305,10 @@ NTSTATUS DiskSpoofer::AllocateAndSetDiskString(
 
     RtlStringCbCopyA(allocatedString, allocSize, NewValue);
 
-    // Обновляем STRING структуру
     TargetString->Buffer = allocatedString;
     TargetString->Length = static_cast<USHORT>(newValueLength);
     TargetString->MaximumLength = static_cast<USHORT>(allocSize);
 
-    // Отслеживаем выделенную память
     NTSTATUS status = TrackAllocatedDiskString(Context, allocatedString, allocSize, Extension, StringType);
     if (!NT_SUCCESS(status)) {
         EGIDA_FREE(allocatedString);
@@ -331,7 +329,6 @@ NTSTATUS DiskSpoofer::TrackAllocatedDiskString(
     _In_ PRAID_UNIT_EXTENSION Extension,
     _In_ ULONG StringType
 ) {
-    // Расширяем массив отслеживания
     ULONG newCount = Context->DiskAllocatedStringCount + 1;
     PDISK_ALLOCATED_STRING newArray = static_cast<PDISK_ALLOCATED_STRING>(
         EGIDA_ALLOC_NON_PAGED(newCount * sizeof(DISK_ALLOCATED_STRING))
@@ -341,14 +338,12 @@ NTSTATUS DiskSpoofer::TrackAllocatedDiskString(
         return EGIDA_INSUFFICIENT_RESOURCES;
     }
 
-    // Копируем существующие записи
     if (Context->DiskAllocatedStrings) {
         RtlCopyMemory(newArray, Context->DiskAllocatedStrings,
             Context->DiskAllocatedStringCount * sizeof(DISK_ALLOCATED_STRING));
         EGIDA_FREE(Context->DiskAllocatedStrings);
     }
 
-    // Добавляем новую запись
     newArray[Context->DiskAllocatedStringCount].StringPointer = StringPointer;
     newArray[Context->DiskAllocatedStringCount].StringSize = StringSize;
     newArray[Context->DiskAllocatedStringCount].OwnerExtension = Extension;
@@ -375,7 +370,6 @@ VOID DiskSpoofer::FreeDiskAllocatedStrings(
                 Context->DiskAllocatedStrings[i].StringType,
                 Context->DiskAllocatedStrings[i].StringSize);
 
-            // Обнуляем ссылку в оригинальной структуре если возможно
             __try {
                 PRAID_UNIT_EXTENSION ext = Context->DiskAllocatedStrings[i].OwnerExtension;
                 if (ext && EgidaUtils::IsValidKernelPointer(ext)) {

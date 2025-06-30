@@ -6,10 +6,12 @@
 
 // Essential kernel headers only
 extern "C" {
+
 #include <ntifs.h>
 #include <ntstrsafe.h>
 #include <ntddk.h>
 #include <wdf.h>
+
 }
 
 // Disable C++ features not available in kernel
@@ -17,9 +19,9 @@ extern "C" {
 extern "C" {
 #endif
 
-    // Driver Information
+// Driver Information
 #define EGIDA_POOL_TAG 'agdE'
-#define EGIDA_VERSION "1.0.0"
+#define EGIDA_VERSION "1.2.0"
 
 // Device names
 #define DEVICE_NAME L"\\Device\\Egida"
@@ -68,11 +70,10 @@ extern "C" {
 #define EGIDA_SPOOF_ALL            0xFFFFFFFF
 
 // Basic types for kernel mode
-    typedef unsigned char   UINT8;
-    typedef unsigned short  UINT16;
-    typedef unsigned __int64 UINT64;
+typedef unsigned char    UINT8;
+typedef unsigned short   UINT16;
+typedef unsigned __int64 UINT64;
 
-    // Missing definitions
 #ifndef MAX_PATH
 #define MAX_PATH 260
 #endif
