@@ -21,14 +21,12 @@ Designed for educational and research purposes, EGIDA can spoof several hardware
 - [x] Fully x64 Supported (Tested on Windows 10/11)
 - [x] Supports UEFI-based systems
 - [x] No dependency on external usermode applications
-
+- [x] Profile System — create, save and apply custom spoofing profiles
 ---
 
 ## 📌 Planned Features
-- [ ] Profile System — create, save and apply custom spoofing profiles
 - [ ] Steam Deep Cleaning — remove residual Steam identifiers and traces
 - [ ] NVIDIA Spoofing — clean or spoof GPU UUID, BIOS version, and driver strings
-
 ---
 
 ## 🔧 Requirements
