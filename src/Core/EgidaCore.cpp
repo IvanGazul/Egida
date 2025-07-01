@@ -51,6 +51,10 @@ NTSTATUS EgidaCore::Initialize(_Out_ PEGIDA_CONTEXT* Context) {
     context->Config.RandomConfig.MaxStringLength = 16;
     context->Config.RandomConfig.RandomSeed = static_cast<UINT32>(KeQueryTimeIncrement());
 
+    // Initialize profile data fields
+    context->HasProfileData = FALSE;
+    RtlZeroMemory(&context->CurrentProfile, sizeof(PROFILE_DATA));
+
     // Initialize modules
     NTSTATUS status = InitializeModules(context);
     if (!NT_SUCCESS(status)) {
@@ -187,7 +191,6 @@ NTSTATUS EgidaCore::StopSpoofing(_In_ PEGIDA_CONTEXT Context) {
     return EGIDA_SUCCESS;
 }
 
-// NEW: GPU-specific control methods
 NTSTATUS EgidaCore::StartGPUSpoofing(_In_ PEGIDA_CONTEXT Context) {
     if (!Context || !Context->IsInitialized) {
         EgidaLogError("Context not initialized");
@@ -292,6 +295,144 @@ VOID EgidaCore::CleanupModules(_In_ PEGIDA_CONTEXT Context) {
     }
 }
 
+NTSTATUS EgidaCore::SetProfileData(_In_ PEGIDA_CONTEXT Context, _In_ PPROFILE_DATA ProfileData) {
+    if (!Context || !ProfileData) {
+        EgidaLogError("Invalid parameters for SetProfileData");
+        return EGIDA_FAILED;
+    }
+
+    // Validate profile data
+    NTSTATUS status = ValidateProfileData(ProfileData);
+    if (!NT_SUCCESS(status)) {
+        EgidaLogError("Profile data validation failed: 0x%08X", status);
+        return status;
+    }
+
+    EgidaLogInfo("=== SETTING PROFILE DATA ===");
+    EgidaLogInfo("Profile Name: %s", ProfileData->ProfileName);
+    EgidaLogInfo("Random Seed: %lu", ProfileData->RandomSeed);
+
+    // Log SMBIOS values
+    EgidaLogInfo("--- SMBIOS Profile Values ---");
+    EgidaLogInfo("Motherboard Serial: %s", ProfileData->MotherboardSerial);
+    EgidaLogInfo("System Manufacturer: %s", ProfileData->SystemManufacturer);
+    EgidaLogInfo("System Product: %s", ProfileData->SystemProductName);
+    EgidaLogInfo("System Serial: %s", ProfileData->SystemSerialNumber);
+    EgidaLogInfo("System UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+        ProfileData->SystemUUID[0], ProfileData->SystemUUID[1], ProfileData->SystemUUID[2], ProfileData->SystemUUID[3],
+        ProfileData->SystemUUID[4], ProfileData->SystemUUID[5], ProfileData->SystemUUID[6], ProfileData->SystemUUID[7],
+        ProfileData->SystemUUID[8], ProfileData->SystemUUID[9], ProfileData->SystemUUID[10], ProfileData->SystemUUID[11],
+        ProfileData->SystemUUID[12], ProfileData->SystemUUID[13], ProfileData->SystemUUID[14], ProfileData->SystemUUID[15]);
+
+    // Log Disk values
+    EgidaLogInfo("--- Disk Profile Values ---");
+    EgidaLogInfo("Disk Serial: %s", ProfileData->DiskSerial);
+    EgidaLogInfo("Disk Model: %s", ProfileData->DiskModel);
+    EgidaLogInfo("Disk Vendor: %s", ProfileData->DiskVendor);
+
+    // Log Network values
+    EgidaLogInfo("--- Network Profile Values ---");
+    EgidaLogInfo("MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
+        ProfileData->MacAddress[0], ProfileData->MacAddress[1], ProfileData->MacAddress[2],
+        ProfileData->MacAddress[3], ProfileData->MacAddress[4], ProfileData->MacAddress[5]);
+
+    // Log GPU values
+    EgidaLogInfo("--- GPU Profile Values ---");
+    EgidaLogInfo("GPU Description: %s", ProfileData->GpuDescription);
+    EgidaLogInfo("GPU PNP ID: %s", ProfileData->GpuPNPID);
+
+    // Log BIOS values
+    EgidaLogInfo("--- BIOS Profile Values ---");
+    EgidaLogInfo("BIOS Vendor: %s", ProfileData->BiosVendor);
+    EgidaLogInfo("BIOS Version: %s", ProfileData->BiosVersion);
+    EgidaLogInfo("BIOS Date: %s", ProfileData->BiosReleaseDate);
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&Context->SpinLock, &oldIrql);
+
+    // Copy profile data to context
+    RtlCopyMemory(&Context->CurrentProfile, ProfileData, sizeof(PROFILE_DATA));
+    Context->HasProfileData = TRUE;
+
+    KeReleaseSpinLock(&Context->SpinLock, oldIrql);
+
+    EgidaLogInfo("Profile data stored in context successfully");
+    EgidaLogInfo("=== PROFILE DATA SET COMPLETE ===");
+
+    return EGIDA_SUCCESS;
+}
+
+NTSTATUS EgidaCore::ValidateProfileData(_In_ PPROFILE_DATA ProfileData) {
+    if (!ProfileData) {
+        EgidaLogError("ProfileData pointer is NULL");
+        return EGIDA_FAILED;
+    }
+
+    EgidaLogDebug("=== PROFILE VALIDATION DEBUG ===");
+    EgidaLogDebug("Profile address: 0x%p", ProfileData);
+    EgidaLogDebug("Profile IsValid field: %d (0x%02X)", ProfileData->IsValid, ProfileData->IsValid);
+    EgidaLogDebug("Profile Checksum: 0x%08X", ProfileData->Checksum);
+    EgidaLogDebug("Profile Name length: %zu", strnlen(ProfileData->ProfileName, sizeof(ProfileData->ProfileName)));
+    EgidaLogDebug("Profile Name: '%.63s'", ProfileData->ProfileName);
+
+    // Check if profile is marked as valid
+    if (!ProfileData->IsValid) {
+        EgidaLogError("Profile data marked as invalid (IsValid = %d)", ProfileData->IsValid);
+        return EGIDA_FAILED;
+    }
+
+    // Verify checksum
+    UINT32 calculatedChecksum = CalculateProfileChecksum(ProfileData);
+    EgidaLogDebug("Calculated checksum: 0x%08X", calculatedChecksum);
+
+    if (calculatedChecksum != ProfileData->Checksum) {
+        EgidaLogError("Profile checksum mismatch: expected 0x%08X, got 0x%08X",
+            ProfileData->Checksum, calculatedChecksum);
+        return EGIDA_FAILED;
+    }
+
+    // Validate profile name
+    SIZE_T nameLength = strnlen(ProfileData->ProfileName, sizeof(ProfileData->ProfileName));
+    if (nameLength == 0) {
+        EgidaLogError("Profile name is empty");
+        return EGIDA_FAILED;
+    }
+
+    // Log some profile content for verification
+    EgidaLogDebug("System Serial: '%.63s'", ProfileData->SystemSerialNumber);
+    EgidaLogDebug("Disk Serial: '%.63s'", ProfileData->DiskSerial);
+    EgidaLogDebug("=== PROFILE VALIDATION PASSED ===");
+
+    EgidaLogInfo("Profile data validation passed");
+    return EGIDA_SUCCESS;
+}
+
+UINT32 EgidaCore::CalculateProfileChecksum(_In_ PPROFILE_DATA ProfileData) {
+    if (!ProfileData) {
+        return 0;
+    }
+
+    UINT32 checksum = 0;
+    UINT32 originalChecksum = ProfileData->Checksum;
+
+    // Temporarily clear checksum for calculation
+    ProfileData->Checksum = 0;
+
+    // Simple checksum calculation
+    PUCHAR data = reinterpret_cast<PUCHAR>(ProfileData);
+    SIZE_T size = sizeof(PROFILE_DATA);
+
+    for (SIZE_T i = 0; i < size; i++) {
+        checksum += data[i];
+        checksum = (checksum << 1) | (checksum >> 31); // Rotate left
+    }
+
+    // Restore original checksum
+    ProfileData->Checksum = originalChecksum;
+
+    return checksum;
+}
+
 NTSTATUS EgidaCore::HandleDeviceControl(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp
@@ -339,6 +480,32 @@ NTSTATUS EgidaCore::HandleDeviceControl(
         else {
             status = STATUS_BUFFER_TOO_SMALL;
             EgidaLogError("Buffer too small for configuration structure");
+        }
+        break;
+
+    case IOCTL_EGIDA_SET_PROFILE_DATA:
+        EgidaLogInfo("Processing SET_PROFILE_DATA command");
+        if (irpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(PROFILE_DATA)) {
+            PPROFILE_DATA profileData = static_cast<PPROFILE_DATA>(Irp->AssociatedIrp.SystemBuffer);
+
+            EgidaLogInfo("=== RAW PROFILE DATA RECEIVED ===");
+            EgidaLogInfo("Input buffer length: %lu", irpSp->Parameters.DeviceIoControl.InputBufferLength);
+            EgidaLogInfo("Expected size: %lu", sizeof(PROFILE_DATA));
+            EgidaLogInfo("Profile pointer: 0x%p", profileData);
+
+
+            // Try to read the profile name first (it should be readable)
+            CHAR tempName[65] = { 0 };
+            RtlCopyMemory(tempName, profileData->ProfileName, 64);
+            EgidaLogInfo("Profile name from raw data: '%s'", tempName);
+
+            // Now try the normal processing
+            status = SetProfileData(g_EgidaGlobalContext, profileData);
+        }
+        else {
+            status = STATUS_BUFFER_TOO_SMALL;
+            EgidaLogError("Buffer too small for profile data structure, got %lu, need %lu",
+                irpSp->Parameters.DeviceIoControl.InputBufferLength, sizeof(PROFILE_DATA));
         }
         break;
 

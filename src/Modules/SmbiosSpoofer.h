@@ -19,7 +19,7 @@ public:
     static VOID Cleanup(_In_ PEGIDA_CONTEXT Context);
 
 private:
-    static NTSTATUS FindSmbiosTables(_In_ PEGIDA_CONTEXT Context);
+
     static NTSTATUS ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGIDA_CONTEXT Context);
     static NTSTATUS LoopSmbiosTables(_In_ PVOID MappedBase, _In_ ULONG TableSize, _In_ PEGIDA_CONTEXT Context);
     static NTSTATUS AllocateAndSetSmbiosString(
@@ -28,6 +28,7 @@ private:
         _In_ PCSTR NewValue,
         _In_ PEGIDA_CONTEXT Context
     );
+    
     static VOID FreeSmbiosAllocatedStrings(_In_ PEGIDA_CONTEXT Context);
     static NTSTATUS TrackAllocatedSmbiosString(
         _In_ PEGIDA_CONTEXT Context,
@@ -36,6 +37,8 @@ private:
         _In_ PSMBIOS_HEADER Header,
         _In_ SMBIOS_STRING StringNumber
     );
+
+    static VOID SetStringFromProfile(_In_ PCHAR Buffer, _In_ PCSTR ProfileValue, _In_ UINT32 MaxLength);
 
     // Individual table processors
     static NTSTATUS ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO BiosInfo, _In_ PEGIDA_CONTEXT Context);
@@ -47,7 +50,6 @@ private:
     static NTSTATUS ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO MemoryDeviceInfo, _In_ PEGIDA_CONTEXT Context);
 
     // Utility functions
-    static VOID RandomizeString(_In_ PCHAR String, _In_ UINT32 MaxLength = 0);
     static NTSTATUS ChangeBootEnvironmentInfo(_In_ PEGIDA_CONTEXT Context);
 
     // Module state

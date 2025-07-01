@@ -252,12 +252,7 @@ NTSTATUS NetworkSpoofer::HookNetworkDriversAlternative(_In_ PEGIDA_CONTEXT Conte
         PCWSTR commonAdapterNames[] = {
             L"\\Device\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\0000",
             L"\\Device\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\0001",
-            L"\\Device\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\0002",
-            L"\\Device\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\0003",
-            L"\\Device\\e1d",  // Intel adapter
-            L"\\Device\\e1g",  // Intel gigabit
-            L"\\Device\\RTL8168", // Realtek
-            L"\\Device\\vmxnet3", // VMware
+            L"\\Device\\vmxnet3",
             nullptr
         };
 
@@ -294,13 +289,52 @@ NTSTATUS NetworkSpoofer::HookNetworkDriversAlternative(_In_ PEGIDA_CONTEXT Conte
             }
         }
 
-        // Generate some fake MAC addresses as additional spoofing
-        for (int i = 0; i < 3; i++) {
-            UINT8 fakeMac[6];
-            EgidaRandomizer::GenerateRandomMAC(fakeMac);
+        // Generate spoofed MAC addresses
+        if (Context && Context->HasProfileData) {
+            EgidaLogInfo("Using MAC address from profile");
 
-            EgidaLogInfo("Generated spoofed MAC %d: %02X:%02X:%02X:%02X:%02X:%02X",
-                i + 1, fakeMac[0], fakeMac[1], fakeMac[2], fakeMac[3], fakeMac[4], fakeMac[5]);
+            // Check if profile MAC is not all zeros
+            BOOLEAN macEmpty = TRUE;
+            for (int i = 0; i < 6; i++) {
+                if (Context->CurrentProfile.MacAddress[i] != 0) {
+                    macEmpty = FALSE;
+                    break;
+                }
+            }
+
+            if (!macEmpty) {
+                EgidaLogInfo("Profile MAC address: %02X:%02X:%02X:%02X:%02X:%02X",
+                    Context->CurrentProfile.MacAddress[0], Context->CurrentProfile.MacAddress[1],
+                    Context->CurrentProfile.MacAddress[2], Context->CurrentProfile.MacAddress[3],
+                    Context->CurrentProfile.MacAddress[4], Context->CurrentProfile.MacAddress[5]);
+
+                // TODO: Actually apply the MAC address to network interfaces
+                // This would require more complex registry manipulation or direct interface modification
+            }
+            else {
+                EgidaLogDebug("Profile MAC address is empty, generating random");
+
+                // Generate random MAC addresses as fallback
+                for (int i = 0; i < 3; i++) {
+                    UINT8 fakeMac[6];
+                    EgidaRandomizer::GenerateRandomMAC(fakeMac);
+
+                    EgidaLogInfo("Generated spoofed MAC %d: %02X:%02X:%02X:%02X:%02X:%02X",
+                        i + 1, fakeMac[0], fakeMac[1], fakeMac[2], fakeMac[3], fakeMac[4], fakeMac[5]);
+                }
+            }
+        }
+        else {
+            EgidaLogDebug("No profile data available, generating random MAC addresses");
+
+            // Generate some fake MAC addresses as additional spoofing
+            for (int i = 0; i < 3; i++) {
+                UINT8 fakeMac[6];
+                EgidaRandomizer::GenerateRandomMAC(fakeMac);
+
+                EgidaLogInfo("Generated spoofed MAC %d: %02X:%02X:%02X:%02X:%02X:%02X",
+                    i + 1, fakeMac[0], fakeMac[1], fakeMac[2], fakeMac[3], fakeMac[4], fakeMac[5]);
+            }
         }
 
     }

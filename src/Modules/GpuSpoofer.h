@@ -41,8 +41,8 @@ private:
     static VOID FreeAllocatedStrings(_In_ PEGIDA_CONTEXT Context);
 
     // GPU identification utilities
-    static NTSTATUS GenerateSpoofedPNPDeviceID(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize);
-    static NTSTATUS GenerateSpoofedDescription(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize);
+    static NTSTATUS GenerateSpoofedPNPDeviceID(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS GenerateSpoofedDescription(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize, _In_ PEGIDA_CONTEXT Context);
 
     // Driver and device enumeration
     static NTSTATUS EnumerateDisplayDrivers(_In_ PEGIDA_CONTEXT Context);

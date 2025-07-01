@@ -86,12 +86,21 @@ NTSTATUS SmbiosSpoofer::Initialize(_In_ PEGIDA_CONTEXT Context) {
     return EGIDA_SUCCESS;
 }
 
-VOID SmbiosSpoofer::RandomizeString(_In_ PCHAR String, _In_ UINT32 MaxLength) {
-    if (!String) return;
+VOID SmbiosSpoofer::SetStringFromProfile(_In_ PCHAR Buffer, _In_ PCSTR ProfileValue, _In_ UINT32 MaxLength) {
+    if (!Buffer || !ProfileValue) return;
 
-    UINT32 length = MaxLength > 0 ? MaxLength : static_cast<UINT32>(strlen(String));
-    if (length > 0) {
-        EgidaRandomizer::GenerateRandomString(String, length + 1, TRUE);
+    SIZE_T profileLen = strlen(ProfileValue);
+    SIZE_T maxLen = MaxLength > 0 ? MaxLength : strlen(Buffer);
+    SIZE_T copyLen = min(profileLen, maxLen);
+
+    // Direct character-by-character modification
+    for (SIZE_T i = 0; i < copyLen; i++) {
+        Buffer[i] = ProfileValue[i];
+    }
+
+    // Null terminate if we have space
+    if (copyLen < maxLen) {
+        Buffer[copyLen] = '\0';
     }
 }
 
@@ -111,8 +120,14 @@ NTSTATUS SmbiosSpoofer::ChangeBootEnvironmentInfo(_In_ PEGIDA_CONTEXT Context) {
             originalGuid.Data4[0], originalGuid.Data4[1], originalGuid.Data4[2], originalGuid.Data4[3],
             originalGuid.Data4[4], originalGuid.Data4[5], originalGuid.Data4[6], originalGuid.Data4[7]);
 
-        // Generate new GUID
-        EgidaRandomizer::GenerateRandomUUID(&s_BootEnvironmentInfo->BootIdentifier);
+        // Copy UUID from profile
+        if (Context->HasProfileData) {
+            RtlCopyMemory(&s_BootEnvironmentInfo->BootIdentifier, Context->CurrentProfile.SystemUUID, 16);
+        }
+        else {
+            // Fallback to random if no profile
+            EgidaRandomizer::GenerateRandomUUID(&s_BootEnvironmentInfo->BootIdentifier);
+        }
 
         EgidaLogDebug("New Boot GUID: {%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}",
             s_BootEnvironmentInfo->BootIdentifier.Data1, s_BootEnvironmentInfo->BootIdentifier.Data2,
@@ -169,10 +184,12 @@ NTSTATUS SmbiosSpoofer::ExecuteSpoof(_In_ PEGIDA_CONTEXT Context) {
         return EGIDA_FAILED;
     }
 
-    EgidaLogInfo("Executing SMBIOS spoofing...");
+    if (!Context->HasProfileData) {
+        EgidaLogError("No profile data available for SMBIOS spoofing");
+        return EGIDA_FAILED;
+    }
 
-    // Initialize randomizer
-    EgidaRandomizer::InitializeSeed(Context->Config.RandomConfig.RandomSeed);
+    EgidaLogInfo("Executing SMBIOS spoofing with profile data...");
 
     // Map SMBIOS tables
     PVOID mappedBase = MmMapIoSpace(
@@ -258,9 +275,9 @@ NTSTATUS SmbiosSpoofer::ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGI
     }
 
     switch (Header->Type) {
-    //case SMBIOS_TYPE_BIOS:
-    //    EgidaLogDebug("Processing BIOS Information (Type 0)");
-    //    return ProcessBiosInfo(reinterpret_cast<PSMBIOS_BIOS_INFO>(Header), Context);
+    case SMBIOS_TYPE_BIOS:
+        EgidaLogDebug("Processing BIOS Information (Type 0)");
+        return ProcessBiosInfo(reinterpret_cast<PSMBIOS_BIOS_INFO>(Header), Context);
 
     case SMBIOS_TYPE_SYSTEM:
         EgidaLogDebug("Processing System Information (Type 1)");
@@ -293,170 +310,231 @@ NTSTATUS SmbiosSpoofer::ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGI
 NTSTATUS SmbiosSpoofer::ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO BiosInfo, _In_ PEGIDA_CONTEXT Context) {
     if (!BiosInfo || !Context) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing BIOS Information (Type 0)");
+    EgidaLogInfo("Processing BIOS Information (Type 0) with profile data");
 
-    if (Context->Config.RandomConfig.RandomizeStrings) {
-        // Randomize BIOS vendor
-        PCHAR vendor = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->Vendor);
-        if (vendor) {
-            EgidaLogDebug("Original BIOS vendor: %s", vendor);
-            RandomizeString(vendor);
-            EgidaLogDebug("New BIOS vendor: %s", vendor);
-        }
+    // Set BIOS vendor
+    PCHAR vendor = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->Vendor);
+    if (vendor) {
+        EgidaLogDebug("Original BIOS vendor: %s", vendor);
+        SetStringFromProfile(vendor, Context->CurrentProfile.BiosVendor, strlen(vendor));
+        EgidaLogDebug("New BIOS vendor: %s", vendor);
+    }
+    else if (strlen(Context->CurrentProfile.BiosVendor) > 0) {
+        // Allocate new string for null field
+        AllocateAndSetSmbiosString(&BiosInfo->Header, BiosInfo->Vendor, Context->CurrentProfile.BiosVendor, Context);
+        EgidaLogDebug("Allocated BIOS vendor: %s", Context->CurrentProfile.BiosVendor);
+    }
 
-        // Randomize BIOS version
-        PCHAR biosVersion = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->BiosVersion);
-        if (biosVersion) {
-            EgidaLogDebug("Original BIOS version: %s", biosVersion);
-            RandomizeString(biosVersion);
-            EgidaLogDebug("New BIOS version: %s", biosVersion);
-        }
+    // Set BIOS version
+    PCHAR biosVersion = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->BiosVersion);
+    if (biosVersion) {
+        EgidaLogDebug("Original BIOS version: %s", biosVersion);
+        SetStringFromProfile(biosVersion, Context->CurrentProfile.BiosVersion, strlen(biosVersion));
+        EgidaLogDebug("New BIOS version: %s", biosVersion);
+    }
+    else if (strlen(Context->CurrentProfile.BiosVersion) > 0) {
+        AllocateAndSetSmbiosString(&BiosInfo->Header, BiosInfo->BiosVersion, Context->CurrentProfile.BiosVersion, Context);
+        EgidaLogDebug("Allocated BIOS version: %s", Context->CurrentProfile.BiosVersion);
+    }
 
-        // Randomize BIOS release date
-        PCHAR releaseDate = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->BiosReleaseDate);
-        if (releaseDate) {
-            EgidaLogDebug("Original BIOS release date: %s", releaseDate);
-            // Generate random date in MM/DD/YYYY format
-            CHAR newDate[12];
-            RtlStringCbPrintfA(newDate, sizeof(newDate), "%02d/%02d/%04d",
-                EgidaRandomizer::GetRandomNumber(1, 12),
-                EgidaRandomizer::GetRandomNumber(1, 28),
-                EgidaRandomizer::GetRandomNumber(2020, 2024));
-            RtlCopyMemory(releaseDate, newDate, min(strlen(newDate), strlen(releaseDate)));
-            EgidaLogDebug("New BIOS release date: %s", releaseDate);
-        }
+    // Set BIOS release date
+    PCHAR releaseDate = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->BiosReleaseDate);
+    if (releaseDate) {
+        EgidaLogDebug("Original BIOS release date: %s", releaseDate);
+        SetStringFromProfile(releaseDate, Context->CurrentProfile.BiosReleaseDate, strlen(releaseDate));
+        EgidaLogDebug("New BIOS release date: %s", releaseDate);
+    }
+    else if (strlen(Context->CurrentProfile.BiosReleaseDate) > 0) {
+        AllocateAndSetSmbiosString(&BiosInfo->Header, BiosInfo->BiosReleaseDate, Context->CurrentProfile.BiosReleaseDate, Context);
+        EgidaLogDebug("Allocated BIOS release date: %s", Context->CurrentProfile.BiosReleaseDate);
     }
 
     return EGIDA_SUCCESS;
 }
 
 NTSTATUS SmbiosSpoofer::ProcessSystemInfo(_In_ PSMBIOS_SYSTEM_INFO SystemInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!SystemInfo || !Context) return EGIDA_FAILED;
+    if (!SystemInfo || !Context) {
+        EgidaLogError("Invalid parameters for ProcessSystemInfo");
+        return EGIDA_FAILED;
+    }
 
-    EgidaLogInfo("Processing System Information (Type 1)");
+    EgidaLogInfo("=== PROCESSING SYSTEM INFORMATION (TYPE 1) ===");
 
-    if (Context->Config.RandomConfig.RandomizeStrings) {
-        // Randomize manufacturer
-        PCHAR manufacturer = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Manufacturer);
-        if (manufacturer) {
-            EgidaLogDebug("Original system manufacturer: %s", manufacturer);
-            RandomizeString(manufacturer);
-            EgidaLogDebug("New system manufacturer: %s", manufacturer);
-        }
+    // Log original UUID first
+    EgidaLogDebug("Original System UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+        SystemInfo->UUID[0], SystemInfo->UUID[1], SystemInfo->UUID[2], SystemInfo->UUID[3],
+        SystemInfo->UUID[4], SystemInfo->UUID[5], SystemInfo->UUID[6], SystemInfo->UUID[7],
+        SystemInfo->UUID[8], SystemInfo->UUID[9], SystemInfo->UUID[10], SystemInfo->UUID[11],
+        SystemInfo->UUID[12], SystemInfo->UUID[13], SystemInfo->UUID[14], SystemInfo->UUID[15]);
 
-        // Randomize product name
-        PCHAR productName = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->ProductName);
-        if (productName) {
-            EgidaLogDebug("Original product name: %s", productName);
-            RandomizeString(productName);
-            EgidaLogDebug("New product name: %s", productName);
-        }
+    // Set manufacturer
+    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Manufacturer);
+    if (manufacturer) {
+        EgidaLogDebug("Original system manufacturer: %s", manufacturer);
+        SetStringFromProfile(manufacturer, Context->CurrentProfile.SystemManufacturer, strlen(manufacturer));
+        EgidaLogDebug("New system manufacturer: %s", manufacturer);
+    }
+    else if (strlen(Context->CurrentProfile.SystemManufacturer) > 0) {
+        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->Manufacturer, Context->CurrentProfile.SystemManufacturer, Context);
+        EgidaLogDebug("Allocated system manufacturer: %s", Context->CurrentProfile.SystemManufacturer);
+    }
 
-        // Randomize version
-        PCHAR version = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Version);
-        if (version) {
-            EgidaLogDebug("Original system version: %s", version);
-            RandomizeString(version);
-            EgidaLogDebug("New system version: %s", version);
-        }
+    // Set product name
+    PCHAR productName = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->ProductName);
+    if (productName) {
+        EgidaLogDebug("Original product name: %s", productName);
+        SetStringFromProfile(productName, Context->CurrentProfile.SystemProductName, strlen(productName));
+        EgidaLogDebug("New product name: %s", productName);
+    }
+    else if (strlen(Context->CurrentProfile.SystemProductName) > 0) {
+        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->ProductName, Context->CurrentProfile.SystemProductName, Context);
+        EgidaLogDebug("Allocated product name: %s", Context->CurrentProfile.SystemProductName);
+    }
 
-        // Randomize SKU number
-        PCHAR skuNumber = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->SKUNumber);
-        if (skuNumber) {
-            EgidaLogDebug("Original SKU number: %s", skuNumber);
-            RandomizeString(skuNumber);
-            EgidaLogDebug("New SKU number: %s", skuNumber);
-        }
+    // Set version
+    PCHAR version = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Version);
+    if (version) {
+        EgidaLogDebug("Original system version: %s", version);
+        SetStringFromProfile(version, Context->CurrentProfile.SystemVersion, strlen(version));
+        EgidaLogDebug("New system version: %s", version);
+    }
+    else if (strlen(Context->CurrentProfile.SystemVersion) > 0) {
+        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->Version, Context->CurrentProfile.SystemVersion, Context);
+        EgidaLogDebug("Allocated system version: %s", Context->CurrentProfile.SystemVersion);
+    }
 
-        // Randomize family
-        PCHAR family = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Family);
-        if (family) {
-            EgidaLogDebug("Original system family: %s", family);
-            RandomizeString(family);
-            EgidaLogDebug("New system family: %s", family);
+    // Set serial number
+    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->SerialNumber);
+    if (serialNumber) {
+        EgidaLogDebug("Original system serial: %s", serialNumber);
+        SetStringFromProfile(serialNumber, Context->CurrentProfile.SystemSerialNumber, strlen(serialNumber));
+        EgidaLogDebug("New system serial: %s", serialNumber);
+    }
+    else if (strlen(Context->CurrentProfile.SystemSerialNumber) > 0) {
+        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->SerialNumber, Context->CurrentProfile.SystemSerialNumber, Context);
+        EgidaLogDebug("Allocated system serial: %s", Context->CurrentProfile.SystemSerialNumber);
+    }
+
+    // Set SKU number
+    PCHAR skuNumber = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->SKUNumber);
+    if (skuNumber) {
+        EgidaLogDebug("Original SKU number: %s", skuNumber);
+        SetStringFromProfile(skuNumber, Context->CurrentProfile.SystemSKU, strlen(skuNumber));
+        EgidaLogDebug("New SKU number: %s", skuNumber);
+    }
+    else if (strlen(Context->CurrentProfile.SystemSKU) > 0) {
+        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->SKUNumber, Context->CurrentProfile.SystemSKU, Context);
+        EgidaLogDebug("Allocated SKU number: %s", Context->CurrentProfile.SystemSKU);
+    }
+
+    // Set family
+    PCHAR family = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Family);
+    if (family) {
+        EgidaLogDebug("Original system family: %s", family);
+        SetStringFromProfile(family, Context->CurrentProfile.SystemFamily, strlen(family));
+        EgidaLogDebug("New system family: %s", family);
+    }
+    else if (strlen(Context->CurrentProfile.SystemFamily) > 0) {
+        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->Family, Context->CurrentProfile.SystemFamily, Context);
+        EgidaLogDebug("Allocated system family: %s", Context->CurrentProfile.SystemFamily);
+    }
+
+    // === CRITICAL: Set UUID ===
+    EgidaLogInfo("=== SETTING SYSTEM UUID ===");
+
+    // Log profile UUID
+    EgidaLogDebug("Profile UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+        Context->CurrentProfile.SystemUUID[0], Context->CurrentProfile.SystemUUID[1],
+        Context->CurrentProfile.SystemUUID[2], Context->CurrentProfile.SystemUUID[3],
+        Context->CurrentProfile.SystemUUID[4], Context->CurrentProfile.SystemUUID[5],
+        Context->CurrentProfile.SystemUUID[6], Context->CurrentProfile.SystemUUID[7],
+        Context->CurrentProfile.SystemUUID[8], Context->CurrentProfile.SystemUUID[9],
+        Context->CurrentProfile.SystemUUID[10], Context->CurrentProfile.SystemUUID[11],
+        Context->CurrentProfile.SystemUUID[12], Context->CurrentProfile.SystemUUID[13],
+        Context->CurrentProfile.SystemUUID[14], Context->CurrentProfile.SystemUUID[15]);
+
+    // Check if profile UUID is valid (not all zeros)
+    BOOLEAN isValidUUID = FALSE;
+    for (int i = 0; i < 16; i++) {
+        if (Context->CurrentProfile.SystemUUID[i] != 0) {
+            isValidUUID = TRUE;
+            break;
         }
     }
 
-    if (Context->Config.RandomConfig.RandomizeSerials) {
-        // Randomize serial number
-        PCHAR serialNumber = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->SerialNumber);
-        if (serialNumber) {
-            EgidaLogDebug("Original system serial: %s", serialNumber);
-            RandomizeString(serialNumber);
-            EgidaLogDebug("New system serial: %s", serialNumber);
-        }
+    if (isValidUUID) {
+        // Copy UUID from profile
+        RtlCopyMemory(SystemInfo->UUID, Context->CurrentProfile.SystemUUID, 16);
+        EgidaLogInfo("UUID set from profile successfully");
+    }
+    else {
+        EgidaLogWarning("Profile UUID is invalid (all zeros), generating random UUID");
+        EgidaRandomizer::GenerateRandomUUID(reinterpret_cast<GUID*>(SystemInfo->UUID));
+        EgidaLogInfo("Generated random UUID");
     }
 
-    if (Context->Config.RandomConfig.RandomizeUUID) {
-        // Randomize UUID
-        EgidaLogDebug("Randomizing system UUID");
-        EgidaRandomizer::GenerateRandomBytes(SystemInfo->UUID, 16);
+    // Log final UUID
+    EgidaLogInfo("Final System UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+        SystemInfo->UUID[0], SystemInfo->UUID[1], SystemInfo->UUID[2], SystemInfo->UUID[3],
+        SystemInfo->UUID[4], SystemInfo->UUID[5], SystemInfo->UUID[6], SystemInfo->UUID[7],
+        SystemInfo->UUID[8], SystemInfo->UUID[9], SystemInfo->UUID[10], SystemInfo->UUID[11],
+        SystemInfo->UUID[12], SystemInfo->UUID[13], SystemInfo->UUID[14], SystemInfo->UUID[15]);
 
-        // Set version (4) and variant bits according to RFC 4122
-        SystemInfo->UUID[6] = (SystemInfo->UUID[6] & 0x0F) | 0x40; // Version 4
-        SystemInfo->UUID[8] = (SystemInfo->UUID[8] & 0x3F) | 0x80; // Variant bits
-
-        EgidaLogDebug("New system UUID generated");
-    }
-
+    EgidaLogInfo("=== SYSTEM INFORMATION PROCESSING COMPLETED ===");
     return EGIDA_SUCCESS;
 }
 
 NTSTATUS SmbiosSpoofer::ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO BaseboardInfo, _In_ PEGIDA_CONTEXT Context) {
     if (!BaseboardInfo || !Context) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing Baseboard Information (Type 2)");
+    EgidaLogInfo("Processing Baseboard Information (Type 2) with profile data");
 
-    if (Context->Config.RandomConfig.RandomizeStrings) {
-        // Randomize manufacturer
-        PCHAR manufacturer = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Manufacturer);
-        if (manufacturer) {
-            EgidaLogDebug("Original baseboard manufacturer: %s", manufacturer);
-            RandomizeString(manufacturer);
-            EgidaLogDebug("New baseboard manufacturer: %s", manufacturer);
-        }
-
-        // Randomize product
-        PCHAR product = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Product);
-        if (product) {
-            EgidaLogDebug("Original baseboard product: %s", product);
-            RandomizeString(product);
-            EgidaLogDebug("New baseboard product: %s", product);
-        }
-
-        // Randomize version
-        PCHAR version = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Version);
-        if (version) {
-            EgidaLogDebug("Original baseboard version: %s", version);
-            RandomizeString(version);
-            EgidaLogDebug("New baseboard version: %s", version);
-        }
-
-        // Randomize asset tag
-        PCHAR assetTag = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->AssetTag);
-        if (assetTag) {
-            EgidaLogDebug("Original baseboard asset tag: %s", assetTag);
-            RandomizeString(assetTag);
-            EgidaLogDebug("New baseboard asset tag: %s", assetTag);
-        }
-
-        // Randomize location in chassis
-        PCHAR location = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->LocationInChassis);
-        if (location) {
-            EgidaLogDebug("Original baseboard location: %s", location);
-            RandomizeString(location);
-            EgidaLogDebug("New baseboard location: %s", location);
-        }
+    // Set manufacturer
+    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Manufacturer);
+    if (manufacturer) {
+        EgidaLogDebug("Original baseboard manufacturer: %s", manufacturer);
+        SetStringFromProfile(manufacturer, Context->CurrentProfile.BaseboardManufacturer, strlen(manufacturer));
+        EgidaLogDebug("New baseboard manufacturer: %s", manufacturer);
+    }
+    else if (strlen(Context->CurrentProfile.BaseboardManufacturer) > 0) {
+        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Manufacturer, Context->CurrentProfile.BaseboardManufacturer, Context);
+        EgidaLogDebug("Allocated baseboard manufacturer: %s", Context->CurrentProfile.BaseboardManufacturer);
     }
 
-    if (Context->Config.RandomConfig.RandomizeSerials) {
-        // Randomize serial number
-        PCHAR serialNumber = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->SerialNumber);
-        if (serialNumber) {
-            EgidaLogDebug("Original baseboard serial: %s", serialNumber);
-            RandomizeString(serialNumber);
-            EgidaLogDebug("New baseboard serial: %s", serialNumber);
-        }
+    // Set product
+    PCHAR product = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Product);
+    if (product) {
+        EgidaLogDebug("Original baseboard product: %s", product);
+        SetStringFromProfile(product, Context->CurrentProfile.BaseboardProduct, strlen(product));
+        EgidaLogDebug("New baseboard product: %s", product);
+    }
+    else if (strlen(Context->CurrentProfile.BaseboardProduct) > 0) {
+        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Product, Context->CurrentProfile.BaseboardProduct, Context);
+        EgidaLogDebug("Allocated baseboard product: %s", Context->CurrentProfile.BaseboardProduct);
+    }
+
+    // Set version
+    PCHAR version = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Version);
+    if (version) {
+        EgidaLogDebug("Original baseboard version: %s", version);
+        SetStringFromProfile(version, Context->CurrentProfile.BaseboardVersion, strlen(version));
+        EgidaLogDebug("New baseboard version: %s", version);
+    }
+    else if (strlen(Context->CurrentProfile.BaseboardVersion) > 0) {
+        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Version, Context->CurrentProfile.BaseboardVersion, Context);
+        EgidaLogDebug("Allocated baseboard version: %s", Context->CurrentProfile.BaseboardVersion);
+    }
+
+    // Set serial number
+    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->SerialNumber);
+    if (serialNumber) {
+        EgidaLogDebug("Original baseboard serial: %s", serialNumber);
+        SetStringFromProfile(serialNumber, Context->CurrentProfile.BaseboardSerial, strlen(serialNumber));
+        EgidaLogDebug("New baseboard serial: %s", serialNumber);
+    }
+    else if (strlen(Context->CurrentProfile.BaseboardSerial) > 0) {
+        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->SerialNumber, Context->CurrentProfile.BaseboardSerial, Context);
+        EgidaLogDebug("Allocated baseboard serial: %s", Context->CurrentProfile.BaseboardSerial);
     }
 
     return EGIDA_SUCCESS;
@@ -465,42 +543,42 @@ NTSTATUS SmbiosSpoofer::ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO Baseboa
 NTSTATUS SmbiosSpoofer::ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ChassisInfo, _In_ PEGIDA_CONTEXT Context) {
     if (!ChassisInfo || !Context) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing Chassis Information (Type 3)");
+    EgidaLogInfo("Processing Chassis Information (Type 3) with profile data");
 
-    if (Context->Config.RandomConfig.RandomizeStrings) {
-        // Randomize manufacturer
-        PCHAR manufacturer = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->Manufacturer);
-        if (manufacturer) {
-            EgidaLogDebug("Original chassis manufacturer: %s", manufacturer);
-            RandomizeString(manufacturer);
-            EgidaLogDebug("New chassis manufacturer: %s", manufacturer);
-        }
-
-        // Randomize version
-        PCHAR version = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->Version);
-        if (version) {
-            EgidaLogDebug("Original chassis version: %s", version);
-            RandomizeString(version);
-            EgidaLogDebug("New chassis version: %s", version);
-        }
-
-        // Randomize asset tag number
-        PCHAR assetTag = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->AssetTagNumber);
-        if (assetTag) {
-            EgidaLogDebug("Original chassis asset tag: %s", assetTag);
-            RandomizeString(assetTag);
-            EgidaLogDebug("New chassis asset tag: %s", assetTag);
-        }
+    // Set manufacturer
+    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->Manufacturer);
+    if (manufacturer) {
+        EgidaLogDebug("Original chassis manufacturer: %s", manufacturer);
+        SetStringFromProfile(manufacturer, Context->CurrentProfile.ChassisManufacturer, strlen(manufacturer));
+        EgidaLogDebug("New chassis manufacturer: %s", manufacturer);
+    }
+    else if (strlen(Context->CurrentProfile.ChassisManufacturer) > 0) {
+        AllocateAndSetSmbiosString(&ChassisInfo->Header, ChassisInfo->Manufacturer, Context->CurrentProfile.ChassisManufacturer, Context);
+        EgidaLogDebug("Allocated chassis manufacturer: %s", Context->CurrentProfile.ChassisManufacturer);
     }
 
-    if (Context->Config.RandomConfig.RandomizeSerials) {
-        // Randomize serial number
-        PCHAR serialNumber = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->SerialNumber);
-        if (serialNumber) {
-            EgidaLogDebug("Original chassis serial: %s", serialNumber);
-            RandomizeString(serialNumber);
-            EgidaLogDebug("New chassis serial: %s", serialNumber);
-        }
+    // Set version
+    PCHAR version = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->Version);
+    if (version) {
+        EgidaLogDebug("Original chassis version: %s", version);
+        SetStringFromProfile(version, Context->CurrentProfile.ChassisVersion, strlen(version));
+        EgidaLogDebug("New chassis version: %s", version);
+    }
+    else if (strlen(Context->CurrentProfile.ChassisVersion) > 0) {
+        AllocateAndSetSmbiosString(&ChassisInfo->Header, ChassisInfo->Version, Context->CurrentProfile.ChassisVersion, Context);
+        EgidaLogDebug("Allocated chassis version: %s", Context->CurrentProfile.ChassisVersion);
+    }
+
+    // Set serial number
+    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->SerialNumber);
+    if (serialNumber) {
+        EgidaLogDebug("Original chassis serial: %s", serialNumber);
+        SetStringFromProfile(serialNumber, Context->CurrentProfile.ChassisSerial, strlen(serialNumber));
+        EgidaLogDebug("New chassis serial: %s", serialNumber);
+    }
+    else if (strlen(Context->CurrentProfile.ChassisSerial) > 0) {
+        AllocateAndSetSmbiosString(&ChassisInfo->Header, ChassisInfo->SerialNumber, Context->CurrentProfile.ChassisSerial, Context);
+        EgidaLogDebug("Allocated chassis serial: %s", Context->CurrentProfile.ChassisSerial);
     }
 
     return EGIDA_SUCCESS;
@@ -509,64 +587,25 @@ NTSTATUS SmbiosSpoofer::ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ChassisInfo
 NTSTATUS SmbiosSpoofer::ProcessProcessorInfo(_In_ PSMBIOS_PROCESSOR_INFO ProcessorInfo, _In_ PEGIDA_CONTEXT Context) {
     if (!ProcessorInfo || !Context) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing Processor Information (Type 4)");
+    EgidaLogInfo("Processing Processor Information (Type 4) with profile data");
 
-    if (Context->Config.RandomConfig.RandomizeStrings) {
-        // Randomize socket designation
-        PCHAR socketDesignation = EgidaUtils::GetSmbiosString(&ProcessorInfo->Header, ProcessorInfo->SocketDesignation);
-        if (socketDesignation) {
-            EgidaLogDebug("Original socket designation: %s", socketDesignation);
-            RandomizeString(socketDesignation);
-            EgidaLogDebug("New socket designation: %s", socketDesignation);
+    if (strlen(Context->CurrentProfile.ProcessorId) > 0) {
+        EgidaLogDebug("Setting processor ID from profile");
+        UINT64 processorId = 0;
+        for (int i = 0; i < strlen(Context->CurrentProfile.ProcessorId) && i < 16; i++) {
+            char c = Context->CurrentProfile.ProcessorId[i];
+            if (c >= '0' && c <= '9') {
+                processorId = (processorId << 4) | (c - '0');
+            }
+            else if (c >= 'A' && c <= 'F') {
+                processorId = (processorId << 4) | (c - 'A' + 10);
+            }
+            else if (c >= 'a' && c <= 'f') {
+                processorId = (processorId << 4) | (c - 'a' + 10);
+            }
         }
-
-        // Randomize manufacturer
-        PCHAR manufacturer = EgidaUtils::GetSmbiosString(&ProcessorInfo->Header, ProcessorInfo->ProcessorManufacturer);
-        if (manufacturer) {
-            EgidaLogDebug("Original processor manufacturer: %s", manufacturer);
-            RandomizeString(manufacturer);
-            EgidaLogDebug("New processor manufacturer: %s", manufacturer);
-        }
-
-        // Randomize processor version
-        PCHAR version = EgidaUtils::GetSmbiosString(&ProcessorInfo->Header, ProcessorInfo->ProcessorVersion);
-        if (version) {
-            EgidaLogDebug("Original processor version: %s", version);
-            RandomizeString(version);
-            EgidaLogDebug("New processor version: %s", version);
-        }
-
-        // Randomize asset tag
-        PCHAR assetTag = EgidaUtils::GetSmbiosString(&ProcessorInfo->Header, ProcessorInfo->AssetTag);
-        if (assetTag) {
-            EgidaLogDebug("Original processor asset tag: %s", assetTag);
-            RandomizeString(assetTag);
-            EgidaLogDebug("New processor asset tag: %s", assetTag);
-        }
-
-        // Randomize part number
-        PCHAR partNumber = EgidaUtils::GetSmbiosString(&ProcessorInfo->Header, ProcessorInfo->PartNumber);
-        if (partNumber) {
-            EgidaLogDebug("Original processor part number: %s", partNumber);
-            RandomizeString(partNumber);
-            EgidaLogDebug("New processor part number: %s", partNumber);
-        }
-    }
-
-    if (Context->Config.RandomConfig.RandomizeSerials) {
-        // Randomize serial number
-        PCHAR serialNumber = EgidaUtils::GetSmbiosString(&ProcessorInfo->Header, ProcessorInfo->SerialNumber);
-        if (serialNumber) {
-            EgidaLogDebug("Original processor serial: %s", serialNumber);
-            RandomizeString(serialNumber);
-            EgidaLogDebug("New processor serial: %s", serialNumber);
-        }
-    }
-
-    // Randomize processor ID
-    if (Context->Config.RandomConfig.RandomizeUUID) {
-        EgidaLogDebug("Randomizing processor ID");
-        EgidaRandomizer::GenerateRandomBytes(reinterpret_cast<PUCHAR>(&ProcessorInfo->ProcessorID), sizeof(ProcessorInfo->ProcessorID));
+        ProcessorInfo->ProcessorID = processorId;
+        EgidaLogDebug("Set processor ID: 0x%llx", processorId);
     }
 
     return EGIDA_SUCCESS;
@@ -577,12 +616,9 @@ NTSTATUS SmbiosSpoofer::ProcessMemoryArrayInfo(_In_ PSMBIOS_MEMORY_ARRAY_INFO Me
 
     EgidaLogInfo("Processing Memory Array Information (Type 16)");
 
-    // For memory array, we mainly randomize the error information handle
-    if (Context->Config.RandomConfig.RandomizeSerials) {
-        // Randomize memory error information handle
-        MemoryArrayInfo->MemoryErrorInformationHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
-        EgidaLogDebug("Randomized memory error information handle: 0x%04X", MemoryArrayInfo->MemoryErrorInformationHandle);
-    }
+    // Randomize memory error information handle
+    MemoryArrayInfo->MemoryErrorInformationHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
+    EgidaLogDebug("Randomized memory error information handle: 0x%04X", MemoryArrayInfo->MemoryErrorInformationHandle);
 
     return EGIDA_SUCCESS;
 }
@@ -592,87 +628,213 @@ NTSTATUS SmbiosSpoofer::ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO 
 
     EgidaLogInfo("Processing Memory Device Information (Type 17)");
 
-    if (Context->Config.RandomConfig.RandomizeStrings) {
-        // Randomize device locator
-        PCHAR deviceLocator = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->DeviceLocator);
-        if (deviceLocator) {
-            EgidaLogDebug("Original device locator: %s", deviceLocator);
-            RandomizeString(deviceLocator);
-            EgidaLogDebug("New device locator: %s", deviceLocator);
-        }
+    NTSTATUS status = EGIDA_SUCCESS;
 
-        // Randomize bank locator
-        PCHAR bankLocator = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->BankLocator);
-        if (bankLocator) {
-            EgidaLogDebug("Original bank locator: %s", bankLocator);
-            RandomizeString(bankLocator);
-            EgidaLogDebug("New bank locator: %s", bankLocator);
-        }
+    // Process Manufacturer (String 13)
+    if (MemoryDeviceInfo->Manufacturer > 0) {
+        PCHAR manufacturerStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->Manufacturer);
+        if (manufacturerStr && strlen(manufacturerStr) > 0) {
+            EgidaLogDebug("Original Memory Manufacturer: %s", manufacturerStr);
 
-        // Randomize manufacturer
-        PCHAR manufacturer = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->Manufacturer);
-        if (manufacturer) {
-            EgidaLogDebug("Original memory manufacturer: %s", manufacturer);
-            RandomizeString(manufacturer);
-            EgidaLogDebug("New memory manufacturer: %s", manufacturer);
+            // Use memory manufacturer from profile if available
+            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryManufacturer) > 0) {
+                SetStringFromProfile(manufacturerStr, Context->CurrentProfile.MemoryManufacturer, strlen(manufacturerStr));
+                EgidaLogInfo("Set memory manufacturer from profile: %s", Context->CurrentProfile.MemoryManufacturer);
+            }
+            else {
+                // Generate random manufacturer
+                const char* manufacturers[] = {
+                    "Samsung", "SK Hynix", "Micron Technology", "Kingston Technology",
+                    "Corsair", "G.Skill", "Crucial", "ADATA Technology"
+                };
+                ULONG manufacturerIndex = EgidaRandomizer::GetRandomNumber(0, ARRAYSIZE(manufacturers) - 1);
+                SetStringFromProfile(manufacturerStr, manufacturers[manufacturerIndex], strlen(manufacturerStr));
+                EgidaLogInfo("Set random memory manufacturer: %s", manufacturers[manufacturerIndex]);
+            }
         }
-
-        // Randomize asset tag
-        PCHAR assetTag = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->AssetTag);
-        if (assetTag) {
-            EgidaLogDebug("Original memory asset tag: %s", assetTag);
-            RandomizeString(assetTag);
-            EgidaLogDebug("New memory asset tag: %s", assetTag);
-        }
-
-        // Randomize part number
-        PCHAR partNumber = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->PartNumber);
-        if (partNumber) {
-            EgidaLogDebug("Original memory part number: %s", partNumber);
-            RandomizeString(partNumber);
-            EgidaLogDebug("New memory part number: %s", partNumber);
-        }
-
-        // Randomize firmware version (if present)
-        PCHAR firmwareVersion = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->FirmwareVersion);
-        if (firmwareVersion) {
-            EgidaLogDebug("Original firmware version: %s", firmwareVersion);
-            RandomizeString(firmwareVersion);
-            EgidaLogDebug("New firmware version: %s", firmwareVersion);
+        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryManufacturer) > 0) {
+            // Allocate new string for null field
+            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->Manufacturer,
+                Context->CurrentProfile.MemoryManufacturer, Context);
+            if (NT_SUCCESS(status)) {
+                EgidaLogInfo("Allocated memory manufacturer from profile: %s", Context->CurrentProfile.MemoryManufacturer);
+            }
         }
     }
 
-    if (Context->Config.RandomConfig.RandomizeSerials) {
-        // Randomize serial number
-        PCHAR serialNumber = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->SerialNumber);
-        if (serialNumber) {
-            EgidaLogDebug("Original memory serial: %s", serialNumber);
-            RandomizeString(serialNumber);
-            EgidaLogDebug("New memory serial: %s", serialNumber);
+    // Process Serial Number (String 15)
+    if (MemoryDeviceInfo->SerialNumber > 0) {
+        PCHAR serialStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->SerialNumber);
+        if (serialStr && strlen(serialStr) > 0) {
+            EgidaLogDebug("Original Memory Serial: %s", serialStr);
+
+            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemorySerial) > 0) {
+                // Use serial from profile
+                SetStringFromProfile(serialStr, Context->CurrentProfile.MemorySerial, strlen(serialStr));
+                EgidaLogInfo("Set memory serial from profile: %s", Context->CurrentProfile.MemorySerial);
+            }
+            else {
+                // Generate random alphanumeric serial (8-16 characters)
+                ULONG serialLength = min(strlen(serialStr), 16);
+                if (serialLength < 8) serialLength = 8;
+
+                PCHAR newSerial = EgidaRandomizer::GenerateRandomAlphanumericString(serialLength);
+                if (newSerial) {
+                    SetStringFromProfile(serialStr, newSerial, strlen(serialStr));
+                    EgidaLogInfo("Set random memory serial: %s", newSerial);
+                    EGIDA_FREE(newSerial);
+                }
+            }
         }
-
-        // Randomize memory array handle
-        MemoryDeviceInfo->MemoryArrayHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
-
-        // Randomize memory error information handle
-        MemoryDeviceInfo->MemoryErrorInformationHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
-
-        // Randomize manufacturer and module IDs
-        MemoryDeviceInfo->ModuleManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-        MemoryDeviceInfo->ModuleProductID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-        MemoryDeviceInfo->MemorySubsystemControllerManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-        MemoryDeviceInfo->MemorySubsystemControllerProductID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-
-        // Randomize PMIC and RCD IDs
-        MemoryDeviceInfo->Pmic0ManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-        MemoryDeviceInfo->Pmic0RevisionNumber = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x01, 0xFF));
-        MemoryDeviceInfo->RcdManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-        MemoryDeviceInfo->RcdRevisionNumber = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x01, 0xFF));
-
-        EgidaLogDebug("Randomized memory device handles and IDs");
+        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemorySerial) > 0) {
+            // Allocate new string for null field
+            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->SerialNumber,
+                Context->CurrentProfile.MemorySerial, Context);
+            if (NT_SUCCESS(status)) {
+                EgidaLogInfo("Allocated memory serial from profile: %s", Context->CurrentProfile.MemorySerial);
+            }
+        }
     }
 
-    return EGIDA_SUCCESS;
+    // Process Part Number (String 18)
+    if (MemoryDeviceInfo->PartNumber > 0) {
+        PCHAR partStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->PartNumber);
+        if (partStr && strlen(partStr) > 0) {
+            EgidaLogDebug("Original Memory Part Number: %s", partStr);
+
+            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryPartNumber) > 0) {
+                // Use part number from profile
+                SetStringFromProfile(partStr, Context->CurrentProfile.MemoryPartNumber, strlen(partStr));
+                EgidaLogInfo("Set memory part number from profile: %s", Context->CurrentProfile.MemoryPartNumber);
+            }
+            else {
+                // Generate random part number (alphanumeric, 10-16 characters)
+                ULONG partLength = min(strlen(partStr), 16);
+                if (partLength < 10) partLength = 10;
+
+                PCHAR newPartNumber = EgidaRandomizer::GenerateRandomAlphanumericString(partLength);
+                if (newPartNumber) {
+                    SetStringFromProfile(partStr, newPartNumber, strlen(partStr));
+                    EgidaLogInfo("Set random memory part number: %s", newPartNumber);
+                    EGIDA_FREE(newPartNumber);
+                }
+            }
+        }
+        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryPartNumber) > 0) {
+            // Allocate new string for null field
+            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->PartNumber,
+                Context->CurrentProfile.MemoryPartNumber, Context);
+            if (NT_SUCCESS(status)) {
+                EgidaLogInfo("Allocated memory part number from profile: %s", Context->CurrentProfile.MemoryPartNumber);
+            }
+        }
+    }
+
+    // Process Asset Tag (String 16)
+    if (MemoryDeviceInfo->AssetTag > 0) {
+        PCHAR assetStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->AssetTag);
+        if (assetStr && strlen(assetStr) > 0) {
+            EgidaLogDebug("Original Memory Asset Tag: %s", assetStr);
+
+            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryAssetTag) > 0) {
+                // Use asset tag from profile
+                SetStringFromProfile(assetStr, Context->CurrentProfile.MemoryAssetTag, strlen(assetStr));
+                EgidaLogInfo("Set memory asset tag from profile: %s", Context->CurrentProfile.MemoryAssetTag);
+            }
+            else {
+                // Generate random asset tag (shorter, 6-12 characters)
+                ULONG assetLength = min(strlen(assetStr), 12);
+                if (assetLength < 6) assetLength = 6;
+
+                PCHAR newAssetTag = EgidaRandomizer::GenerateRandomAlphanumericString(assetLength);
+                if (newAssetTag) {
+                    SetStringFromProfile(assetStr, newAssetTag, strlen(assetStr));
+                    EgidaLogInfo("Set random memory asset tag: %s", newAssetTag);
+                    EGIDA_FREE(newAssetTag);
+                }
+            }
+        }
+        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryAssetTag) > 0) {
+            // Allocate new string for null field
+            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->AssetTag,
+                Context->CurrentProfile.MemoryAssetTag, Context);
+            if (NT_SUCCESS(status)) {
+                EgidaLogInfo("Allocated memory asset tag from profile: %s", Context->CurrentProfile.MemoryAssetTag);
+            }
+        }
+    }
+
+    // Process Device Locator (String 9)
+    if (MemoryDeviceInfo->DeviceLocator > 0) {
+        PCHAR locatorStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->DeviceLocator);
+        if (locatorStr && strlen(locatorStr) > 0) {
+            EgidaLogDebug("Original Device Locator: %s", locatorStr);
+
+            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryDeviceLocator) > 0) {
+                // Use device locator from profile
+                SetStringFromProfile(locatorStr, Context->CurrentProfile.MemoryDeviceLocator, strlen(locatorStr));
+                EgidaLogInfo("Set memory device locator from profile: %s", Context->CurrentProfile.MemoryDeviceLocator);
+            }
+            else {
+                // Generate random device locator
+                const char* locators[] = {
+                    "DIMM_A1", "DIMM_A2", "DIMM_B1", "DIMM_B2",
+                    "DIMM_C1", "DIMM_C2", "DIMM_D1", "DIMM_D2",
+                    "Channel-A-DIMM0", "Channel-B-DIMM0", "Channel-A-DIMM1", "Channel-B-DIMM1"
+                };
+                ULONG locatorIndex = EgidaRandomizer::GetRandomNumber(0, ARRAYSIZE(locators) - 1);
+                SetStringFromProfile(locatorStr, locators[locatorIndex], strlen(locatorStr));
+                EgidaLogInfo("Set random device locator: %s", locators[locatorIndex]);
+            }
+        }
+        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryDeviceLocator) > 0) {
+            // Allocate new string for null field
+            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->DeviceLocator,
+                Context->CurrentProfile.MemoryDeviceLocator, Context);
+            if (NT_SUCCESS(status)) {
+                EgidaLogInfo("Allocated device locator from profile: %s", Context->CurrentProfile.MemoryDeviceLocator);
+            }
+        }
+    }
+
+    // Process Bank Locator (String 10)
+    if (MemoryDeviceInfo->BankLocator > 0) {
+        PCHAR bankStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->BankLocator);
+        if (bankStr && strlen(bankStr) > 0) {
+            EgidaLogDebug("Original Bank Locator: %s", bankStr);
+
+            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryBankLocator) > 0) {
+                // Use bank locator from profile
+                SetStringFromProfile(bankStr, Context->CurrentProfile.MemoryBankLocator, strlen(bankStr));
+                EgidaLogInfo("Set memory bank locator from profile: %s", Context->CurrentProfile.MemoryBankLocator);
+            }
+            else {
+                // Generate random bank locator
+                const char* banks[] = {
+                    "BANK 0", "BANK 1", "BANK 2", "BANK 3",
+                    "NODE 0", "NODE 1", "P0-DIMM0", "P0-DIMM1"
+                };
+                ULONG bankIndex = EgidaRandomizer::GetRandomNumber(0, ARRAYSIZE(banks) - 1);
+                SetStringFromProfile(bankStr, banks[bankIndex], strlen(bankStr));
+                EgidaLogInfo("Set random bank locator: %s", banks[bankIndex]);
+            }
+        }
+        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryBankLocator) > 0) {
+            // Allocate new string for null field
+            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->BankLocator,
+                Context->CurrentProfile.MemoryBankLocator, Context);
+            if (NT_SUCCESS(status)) {
+                EgidaLogInfo("Allocated bank locator from profile: %s", Context->CurrentProfile.MemoryBankLocator);
+            }
+        }
+    }
+
+    // Randomize memory error information handle for additional obfuscation
+    MemoryDeviceInfo->MemoryErrorInformationHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
+    EgidaLogDebug("Randomized memory error information handle: 0x%04X", MemoryDeviceInfo->MemoryErrorInformationHandle);
+
+    EgidaLogInfo("Memory device spoofing completed");
+    return status;
 }
 
 NTSTATUS SmbiosSpoofer::AllocateAndSetSmbiosString(
@@ -685,14 +847,14 @@ NTSTATUS SmbiosSpoofer::AllocateAndSetSmbiosString(
         return EGIDA_FAILED;
     }
 
-    // Получаем указатель на строку
+    // Get pointer to existing string
     PCHAR existingString = EgidaUtils::GetSmbiosString(Header, StringNumber);
 
     SIZE_T newValueLength = strlen(NewValue);
     SIZE_T allocSize = newValueLength + 1;
 
     if (!existingString) {
-        // Поле null - нужно выделить память
+        // Field is null - need to allocate memory
         EgidaLogDebug("SMBIOS string %d is null, allocating memory (size: %zu)", StringNumber, allocSize);
 
         PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
@@ -701,9 +863,13 @@ NTSTATUS SmbiosSpoofer::AllocateAndSetSmbiosString(
             return EGIDA_INSUFFICIENT_RESOURCES;
         }
 
-        RtlStringCbCopyA(allocatedString, allocSize, NewValue);
+        // Use direct character-by-character copy like the randomizer
+        for (SIZE_T i = 0; i < newValueLength; i++) {
+            allocatedString[i] = NewValue[i];
+        }
+        allocatedString[newValueLength] = '\0';
 
-        // Добавляем в список отслеживания
+        // Track allocated memory
         NTSTATUS status = TrackAllocatedSmbiosString(Context, allocatedString, allocSize, Header, StringNumber);
         if (!NT_SUCCESS(status)) {
             EGIDA_FREE(allocatedString);
@@ -713,29 +879,40 @@ NTSTATUS SmbiosSpoofer::AllocateAndSetSmbiosString(
         EgidaLogDebug("Allocated and set SMBIOS string: %s", NewValue);
     }
     else {
-        // Поле существует - можем изменить на месте
+        // Field exists - modify in place using direct character modification
         SIZE_T existingLength = strlen(existingString);
+        SIZE_T copyLength = min(newValueLength, existingLength);
 
-        if (newValueLength <= existingLength) {
-            // Новая строка помещается в существующее место
-            RtlZeroMemory(existingString, existingLength);
-            RtlStringCbCopyA(existingString, existingLength + 1, NewValue);
-            EgidaLogDebug("Modified existing SMBIOS string: %s", NewValue);
+        // Direct character-by-character modification
+        for (SIZE_T i = 0; i < copyLength; i++) {
+            existingString[i] = NewValue[i];
         }
-        else {
-            // Нужно больше места - выделяем новую память
+
+        // Null terminate if we have space
+        if (copyLength < existingLength) {
+            existingString[copyLength] = '\0';
+        }
+
+        EgidaLogDebug("Modified existing SMBIOS string: %s", NewValue);
+
+        // If the new value is longer than existing space, we need to allocate
+        if (newValueLength > existingLength) {
             PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
             if (!allocatedString) {
                 EgidaLogError("Failed to allocate larger SMBIOS string memory");
                 return EGIDA_INSUFFICIENT_RESOURCES;
             }
 
-            RtlStringCbCopyA(allocatedString, allocSize, NewValue);
+            // Use direct character copying
+            for (SIZE_T i = 0; i < newValueLength; i++) {
+                allocatedString[i] = NewValue[i];
+            }
+            allocatedString[newValueLength] = '\0';
 
-            // Очищаем старую строку
+            // Clear old string
             RtlZeroMemory(existingString, existingLength);
 
-            // Отслеживаем новую выделенную память
+            // Track new allocated memory
             NTSTATUS status = TrackAllocatedSmbiosString(Context, allocatedString, allocSize, Header, StringNumber);
             if (!NT_SUCCESS(status)) {
                 EGIDA_FREE(allocatedString);
@@ -756,7 +933,7 @@ NTSTATUS SmbiosSpoofer::TrackAllocatedSmbiosString(
     _In_ PSMBIOS_HEADER Header,
     _In_ SMBIOS_STRING StringNumber
 ) {
-    // Расширяем массив отслеживания
+    // Expand tracking array
     ULONG newCount = Context->SmbiosAllocatedStringCount + 1;
     PSMBIOS_ALLOCATED_STRING newArray = static_cast<PSMBIOS_ALLOCATED_STRING>(
         EGIDA_ALLOC_NON_PAGED(newCount * sizeof(SMBIOS_ALLOCATED_STRING))
@@ -766,14 +943,14 @@ NTSTATUS SmbiosSpoofer::TrackAllocatedSmbiosString(
         return EGIDA_INSUFFICIENT_RESOURCES;
     }
 
-    // Копируем существующие записи
+    // Copy existing entries
     if (Context->SmbiosAllocatedStrings) {
         RtlCopyMemory(newArray, Context->SmbiosAllocatedStrings,
             Context->SmbiosAllocatedStringCount * sizeof(SMBIOS_ALLOCATED_STRING));
         EGIDA_FREE(Context->SmbiosAllocatedStrings);
     }
 
-    // Добавляем новую запись
+    // Add new entry
     newArray[Context->SmbiosAllocatedStringCount].StringPointer = StringPointer;
     newArray[Context->SmbiosAllocatedStringCount].StringSize = StringSize;
     newArray[Context->SmbiosAllocatedStringCount].OwnerHeader = Header;

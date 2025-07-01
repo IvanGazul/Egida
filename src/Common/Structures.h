@@ -10,6 +10,7 @@
 #define IOCTL_EGIDA_START_GPU_SPOOF    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_EGIDA_STOP_GPU_SPOOF     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_EGIDA_GET_GPU_STATUS     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_EGIDA_SET_PROFILE_DATA   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // Spoof flags - Compatible with user mode app
 #define EGIDA_SPOOF_SMBIOS         0x00000001
@@ -341,6 +342,66 @@ typedef struct _SPOOF_CONFIGURATION {
     BOOLEAN EnableBootInfoSpoof;
 } SPOOF_CONFIGURATION, * PSPOOF_CONFIGURATION;
 
+typedef struct _PROFILE_DATA {
+    CHAR ProfileName[64];
+    UINT32 RandomSeed;
+    CHAR ProcessorId[64];
+
+    // SMBIOS specific values
+    CHAR MotherboardSerial[64];
+    CHAR SystemManufacturer[256];
+    CHAR SystemProductName[256];
+    CHAR SystemVersion[256];
+    CHAR SystemSerialNumber[64];
+    CHAR SystemSKU[256];
+    CHAR SystemFamily[256];
+    UINT8 SystemUUID[16];
+
+    CHAR BaseboardManufacturer[256];
+    CHAR BaseboardProduct[256];
+    CHAR BaseboardVersion[256];
+    CHAR BaseboardSerial[64];
+
+    CHAR ChassisManufacturer[256];
+    CHAR ChassisVersion[256];
+    CHAR ChassisSerial[64];
+
+    // Memory specific values (NEW)
+    CHAR MemoryManufacturer[256];
+    CHAR MemorySerial[64];
+    CHAR MemoryPartNumber[64];
+    CHAR MemoryAssetTag[64];
+    CHAR MemoryDeviceLocator[64];
+    CHAR MemoryBankLocator[64];
+
+    // Disk specific values
+    CHAR DiskSerial[64];
+    CHAR DiskModel[256];
+    CHAR DiskVendor[256];
+
+    // Network specific values
+    UINT8 MacAddress[6];
+
+    // GPU specific values
+    CHAR GpuDescription[256];
+    CHAR GpuPNPID[256];
+
+    // BIOS specific values
+    CHAR BiosVendor[256];
+    CHAR BiosVersion[256];
+    CHAR BiosReleaseDate[32];
+
+    // Validation
+    BOOLEAN IsValid;
+    UINT32 Checksum;
+} PROFILE_DATA, * PPROFILE_DATA;
+
+typedef struct _SPOOF_CONFIGURATION_EX {
+    SPOOF_CONFIGURATION BaseConfig;
+    PROFILE_DATA ProfileData;
+    BOOLEAN UseProfileData; // If TRUE, use ProfileData instead of random generation
+} SPOOF_CONFIGURATION_EX, * PSPOOF_CONFIGURATION_EX;
+
 // Main Egida Context
 typedef struct _EGIDA_CONTEXT {
     PDEVICE_OBJECT DeviceObject;
@@ -373,6 +434,10 @@ typedef struct _EGIDA_CONTEXT {
 
     PDISK_ALLOCATED_STRING DiskAllocatedStrings;
     ULONG DiskAllocatedStringCount;
+
+    // Profile data
+    PROFILE_DATA CurrentProfile;
+    BOOLEAN HasProfileData;
 
     // Status flags
     BOOLEAN IsInitialized;

@@ -10,7 +10,7 @@ public:
     static VOID GenerateRandomMAC(_Out_ PUCHAR MacAddress);
     static VOID GenerateRandomUUID(_Out_ GUID* Uuid);
     static VOID GenerateRandomSerial(_Out_ PCHAR Buffer, _In_ UINT32 Length);
-
+    static PCHAR GenerateRandomAlphanumericString(ULONG length);
 private:
     static UINT32 SimpleRandom();
     static UINT32 HashData(_In_ PUCHAR Data, _In_ UINT32 Length);
@@ -76,6 +76,25 @@ inline VOID EgidaRandomizer::GenerateRandomBytes(_Out_ PUCHAR Buffer, _In_ UINT3
         Buffer[i] = static_cast<UCHAR>(GetRandomNumber(0, 255));
     }
 }
+
+inline PCHAR EgidaRandomizer::GenerateRandomAlphanumericString(ULONG length) {
+    if (length == 0 || length > 64) return nullptr;
+
+    PCHAR buffer = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(length + 1));
+    if (!buffer) return nullptr;
+
+    const char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const ULONG charsetSize = sizeof(charset) - 1; // Exclude null terminator
+
+    for (ULONG i = 0; i < length; i++) {
+        ULONG randomIndex = SimpleRandom() % charsetSize;
+        buffer[i] = charset[randomIndex];
+    }
+
+    buffer[length] = '\0';
+    return buffer;
+}
+
 
 inline VOID EgidaRandomizer::GenerateRandomMAC(_Out_ PUCHAR MacAddress) {
     if (!MacAddress) return;

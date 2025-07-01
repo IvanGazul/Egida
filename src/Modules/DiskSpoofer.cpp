@@ -90,7 +90,7 @@ NTSTATUS DiskSpoofer::ExecuteSpoof(
     FreeDiskAllocatedStrings(Context);
 
     // Initialize randomizer
-    EgidaRandomizer::InitializeSeed(Context->Config.RandomConfig.RandomSeed);
+    EgidaRandomizer::InitializeSeed(Context->CurrentProfile.RandomSeed);
 
     NTSTATUS status = EGIDA_SUCCESS;
 
@@ -212,7 +212,7 @@ NTSTATUS DiskSpoofer::ProcessRaidDevices(
 }
 
 NTSTATUS DiskSpoofer::ProcessSingleDiskDevice(
-    _In_ PRAID_UNIT_EXTENSION Extension, 
+    _In_ PRAID_UNIT_EXTENSION Extension,
     _In_ PEGIDA_CONTEXT Context
 ) {
     if (!Extension || !Context) {
@@ -221,54 +221,83 @@ NTSTATUS DiskSpoofer::ProcessSingleDiskDevice(
 
     NTSTATUS status = EGIDA_SUCCESS;
 
-	// Process disk identity
+    // Process disk identity
     PSTRING serialString = &Extension->_Identity.Identity.SerialNumber;
-    if (Context->Config.RandomConfig.RandomizeSerials) {
-        if (serialString->Buffer && serialString->Length > 0) {
-			
-            // Existing serial - log original
-            CHAR originalSerial[EGIDA_MAX_SERIAL_LENGTH];
-            RtlZeroMemory(originalSerial, sizeof(originalSerial));
 
-            ULONG copyLength = min(serialString->Length, sizeof(originalSerial) - 1);
-            RtlCopyMemory(originalSerial, serialString->Buffer, copyLength);
-            originalSerial[copyLength] = '\0';
+    if (serialString->Buffer && serialString->Length > 0) {
+        // Existing serial - log original
+        CHAR originalSerial[EGIDA_MAX_SERIAL_LENGTH];
+        RtlZeroMemory(originalSerial, sizeof(originalSerial));
 
-            EgidaLogDebug("Original disk serial: %s", originalSerial);
+        ULONG copyLength = min(serialString->Length, sizeof(originalSerial) - 1);
+        RtlCopyMemory(originalSerial, serialString->Buffer, copyLength);
+        originalSerial[copyLength] = '\0';
 
-			// Generate new random serial
-            CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
-            EgidaRandomizer::GenerateRandomSerial(newSerial, sizeof(newSerial));
+        EgidaLogDebug("Original disk serial: %s", originalSerial);
 
-			// Check if new serial fits in existing buffer
-            SIZE_T newSerialLength = strlen(newSerial);
-            if (newSerialLength <= serialString->MaximumLength) {
-				// Fits in existing buffer - update in-place
-                RtlZeroMemory(serialString->Buffer, serialString->MaximumLength);
-                RtlCopyMemory(serialString->Buffer, newSerial, newSerialLength);
-                serialString->Length = static_cast<USHORT>(newSerialLength);
+        CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
 
-                EgidaLogInfo("Updated disk serial in-place: %s -> %s", originalSerial, newSerial);
-            }
-            else {
-				// Not enough space - allocate new memory
-                status = AllocateAndSetDiskString(Extension, serialString, newSerial, Context, DISK_STRING_SERIAL);
-                if (NT_SUCCESS(status)) {
-                    EgidaLogInfo("Allocated new disk serial: %s -> %s", originalSerial, newSerial);
-                }
-            }
+        // Check if we have profile data
+        if (Context->HasProfileData &&
+            strnlen(Context->CurrentProfile.DiskSerial, sizeof(Context->CurrentProfile.DiskSerial)) > 0) {
+
+            EgidaLogInfo("Using disk serial from profile");
+            RtlStringCbCopyA(newSerial, sizeof(newSerial), Context->CurrentProfile.DiskSerial);
+            EgidaLogInfo("Profile disk serial: %s", newSerial);
         }
         else {
-            //Null serial
-            CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
+            EgidaLogDebug("No profile data or empty disk serial, generating random");
             EgidaRandomizer::GenerateRandomSerial(newSerial, sizeof(newSerial));
+            EgidaLogDebug("Generated random disk serial: %s", newSerial);
+        }
 
+        // Check if new serial fits in existing buffer
+        SIZE_T newSerialLength = strlen(newSerial);
+        if (newSerialLength <= serialString->MaximumLength) {
+            // Fits in existing buffer - update in-place
+            RtlZeroMemory(serialString->Buffer, serialString->MaximumLength);
+            RtlCopyMemory(serialString->Buffer, newSerial, newSerialLength);
+            serialString->Length = static_cast<USHORT>(newSerialLength);
+
+            EgidaLogInfo("Updated disk serial in-place: %s -> %s", originalSerial, newSerial);
+        }
+        else {
+            // Not enough space - allocate new memory
             status = AllocateAndSetDiskString(Extension, serialString, newSerial, Context, DISK_STRING_SERIAL);
             if (NT_SUCCESS(status)) {
-                EgidaLogInfo("Allocated disk serial for null field: %s", newSerial);
+                EgidaLogInfo("Allocated new disk serial: %s -> %s", originalSerial, newSerial);
+            }
+            else {
+                EgidaLogError("Failed to allocate new disk serial: 0x%08X", status);
             }
         }
     }
+    else {
+        // Null serial
+        CHAR newSerial[EGIDA_MAX_SERIAL_LENGTH];
+
+        if (Context->HasProfileData &&
+            strnlen(Context->CurrentProfile.DiskSerial, sizeof(Context->CurrentProfile.DiskSerial)) > 0) {
+
+            EgidaLogInfo("Using disk serial from profile for null field");
+            RtlStringCbCopyA(newSerial, sizeof(newSerial), Context->CurrentProfile.DiskSerial);
+            EgidaLogInfo("Profile disk serial: %s", newSerial);
+        }
+        else {
+            EgidaLogDebug("No profile data for null disk serial, generating random");
+            EgidaRandomizer::GenerateRandomSerial(newSerial, sizeof(newSerial));
+            EgidaLogDebug("Generated random disk serial: %s", newSerial);
+        }
+
+        status = AllocateAndSetDiskString(Extension, serialString, newSerial, Context, DISK_STRING_SERIAL);
+        if (NT_SUCCESS(status)) {
+            EgidaLogInfo("Allocated disk serial for null field: %s", newSerial);
+        }
+        else {
+            EgidaLogError("Failed to allocate disk serial for null field: 0x%08X", status);
+        }
+    }
+    
 
     // Disable SMART for this device
     if (NT_SUCCESS(status)) {

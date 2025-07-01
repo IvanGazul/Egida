@@ -220,10 +220,10 @@ NTSTATUS GpuSpoofer::SpoofGpuRegistryValues(_In_ PEGIDA_CONTEXT Context) {
             CHAR spoofedBuffer[EGIDA_MAX_STRING_LENGTH];
             if (gpuValues[i].IsString) {
                 if (wcsstr(gpuValues[i].ValueName, L"Desc") != nullptr) {
-                    GenerateSpoofedDescription(spoofedBuffer, sizeof(spoofedBuffer));
+                    GenerateSpoofedDescription(spoofedBuffer, sizeof(spoofedBuffer), Context);
                 }
                 else {
-                    GenerateSpoofedPNPDeviceID(spoofedBuffer, sizeof(spoofedBuffer));
+                    GenerateSpoofedPNPDeviceID(spoofedBuffer, sizeof(spoofedBuffer), Context);
                 }
 
                 // Convert to wide string for registry using our kernel-safe function
@@ -243,7 +243,7 @@ NTSTATUS GpuSpoofer::SpoofGpuRegistryValues(_In_ PEGIDA_CONTEXT Context) {
                     );
 
                     if (NT_SUCCESS(status)) {
-                        EgidaLogInfo("Successfully spoofed %ws", gpuValues[i].ValueName);
+                        EgidaLogInfo("Successfully spoofed %ws with value: %s", gpuValues[i].ValueName, spoofedBuffer);
                     }
                     else {
                         EgidaLogWarning("Failed to write spoofed value for %ws: 0x%08X", gpuValues[i].ValueName, status);
@@ -253,15 +253,31 @@ NTSTATUS GpuSpoofer::SpoofGpuRegistryValues(_In_ PEGIDA_CONTEXT Context) {
 
             EGIDA_FREE(originalData);
         }
+        else {
+            EgidaLogWarning("Failed to read original value for %ws\\%ws: 0x%08X",
+                gpuValues[i].Path, gpuValues[i].ValueName, status);
+        }
     }
 
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS GpuSpoofer::GenerateSpoofedPNPDeviceID(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize) {
+NTSTATUS GpuSpoofer::GenerateSpoofedPNPDeviceID(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize, _In_ PEGIDA_CONTEXT Context) {
     if (!Buffer || BufferSize < 32) {
         return EGIDA_FAILED;
     }
+
+    // Check if we have profile data
+    if (Context && Context->HasProfileData &&
+        strnlen(Context->CurrentProfile.GpuPNPID, sizeof(Context->CurrentProfile.GpuPNPID)) > 0) {
+
+        EgidaLogInfo("Using GPU PNP ID from profile");
+        RtlStringCbCopyA(Buffer, BufferSize, Context->CurrentProfile.GpuPNPID);
+        EgidaLogInfo("Profile GPU PNP ID: %s", Buffer);
+        return EGIDA_SUCCESS;
+    }
+
+    EgidaLogDebug("No profile data for GPU PNP ID, generating random");
 
     // Generate a realistic looking PNP Device ID
     const char* vendors[] = { "VEN_10DE", "VEN_1002", "VEN_8086" };
@@ -275,13 +291,26 @@ NTSTATUS GpuSpoofer::GenerateSpoofedPNPDeviceID(_Out_ PCHAR Buffer, _In_ UINT32 
         "PCI\\%s&DEV_%04X&SUBSYS_%08X&REV_%02X",
         selectedVendor, deviceId, subsysId, revId);
 
+    EgidaLogDebug("Generated random GPU PNP ID: %s", Buffer);
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS GpuSpoofer::GenerateSpoofedDescription(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize) {
+NTSTATUS GpuSpoofer::GenerateSpoofedDescription(_Out_ PCHAR Buffer, _In_ UINT32 BufferSize, _In_ PEGIDA_CONTEXT Context) {
     if (!Buffer || BufferSize < 32) {
         return EGIDA_FAILED;
     }
+
+    // Check if we have profile data
+    if (Context && Context->HasProfileData &&
+        strnlen(Context->CurrentProfile.GpuDescription, sizeof(Context->CurrentProfile.GpuDescription)) > 0) {
+
+        EgidaLogInfo("Using GPU description from profile");
+        RtlStringCbCopyA(Buffer, BufferSize, Context->CurrentProfile.GpuDescription);
+        EgidaLogInfo("Profile GPU description: %s", Buffer);
+        return EGIDA_SUCCESS;
+    }
+
+    EgidaLogDebug("No profile data for GPU description, generating random");
 
     const char* descriptions[] = {
         "NVIDIA GeForce RTX 3070",
@@ -294,8 +323,10 @@ NTSTATUS GpuSpoofer::GenerateSpoofedDescription(_Out_ PCHAR Buffer, _In_ UINT32 
     const char* selected = descriptions[EgidaRandomizer::GetRandomNumber(0, 4)];
     RtlStringCbCopyA(Buffer, BufferSize, selected);
 
+    EgidaLogDebug("Generated random GPU description: %s", Buffer);
     return EGIDA_SUCCESS;
 }
+
 
 NTSTATUS GpuSpoofer::WriteGpuRegistryValue(
     _In_ PCWSTR RegistryPath,

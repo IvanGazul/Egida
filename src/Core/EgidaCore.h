@@ -31,6 +31,9 @@ public:
     // Context accessor
     static PEGIDA_CONTEXT GetGlobalContext() { return g_EgidaContext; }
 
+    static NTSTATUS SetProfileData(_In_ PEGIDA_CONTEXT Context, _In_ PPROFILE_DATA ProfileData);
+    static NTSTATUS ValidateProfileData(_In_ PPROFILE_DATA ProfileData);
+    static UINT32 CalculateProfileChecksum(_In_ PPROFILE_DATA ProfileData);
 private:
     // Module management
     static NTSTATUS InitializeModules(_In_ PEGIDA_CONTEXT Context);
