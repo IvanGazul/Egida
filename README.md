@@ -45,9 +45,3 @@ EGIDA operates by loading a kernel-mode driver that temporarily modifies values 
 It hooks and patches kernel functions and modifies SMBIOS tables and disk device descriptors in memory.
 
 ---
-
-## ⚙️ Usage
-
-```bash
-1. Disable Secure Boot in BIOS
-2. Map the driver with KDMapper or use EFIGuard
