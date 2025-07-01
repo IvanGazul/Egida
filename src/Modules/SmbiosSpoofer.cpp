@@ -628,213 +628,83 @@ NTSTATUS SmbiosSpoofer::ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO 
 
     EgidaLogInfo("Processing Memory Device Information (Type 17)");
 
-    NTSTATUS status = EGIDA_SUCCESS;
-
-    // Process Manufacturer (String 13)
-    if (MemoryDeviceInfo->Manufacturer > 0) {
-        PCHAR manufacturerStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->Manufacturer);
-        if (manufacturerStr && strlen(manufacturerStr) > 0) {
-            EgidaLogDebug("Original Memory Manufacturer: %s", manufacturerStr);
-
-            // Use memory manufacturer from profile if available
-            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryManufacturer) > 0) {
-                SetStringFromProfile(manufacturerStr, Context->CurrentProfile.MemoryManufacturer, strlen(manufacturerStr));
-                EgidaLogInfo("Set memory manufacturer from profile: %s", Context->CurrentProfile.MemoryManufacturer);
-            }
-            else {
-                // Generate random manufacturer
-                const char* manufacturers[] = {
-                    "Samsung", "SK Hynix", "Micron Technology", "Kingston Technology",
-                    "Corsair", "G.Skill", "Crucial", "ADATA Technology"
-                };
-                ULONG manufacturerIndex = EgidaRandomizer::GetRandomNumber(0, ARRAYSIZE(manufacturers) - 1);
-                SetStringFromProfile(manufacturerStr, manufacturers[manufacturerIndex], strlen(manufacturerStr));
-                EgidaLogInfo("Set random memory manufacturer: %s", manufacturers[manufacturerIndex]);
-            }
-        }
-        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryManufacturer) > 0) {
-            // Allocate new string for null field
-            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->Manufacturer,
-                Context->CurrentProfile.MemoryManufacturer, Context);
-            if (NT_SUCCESS(status)) {
-                EgidaLogInfo("Allocated memory manufacturer from profile: %s", Context->CurrentProfile.MemoryManufacturer);
-            }
-        }
+    // Randomize device locator
+    PCHAR deviceLocator = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->DeviceLocator);
+    if (deviceLocator) {
+        EgidaLogDebug("Original device locator: %s", deviceLocator);
+        EgidaRandomizer::RandomizeString(deviceLocator);
+        EgidaLogDebug("New device locator: %s", deviceLocator);
     }
 
-    // Process Serial Number (String 15)
-    if (MemoryDeviceInfo->SerialNumber > 0) {
-        PCHAR serialStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->SerialNumber);
-        if (serialStr && strlen(serialStr) > 0) {
-            EgidaLogDebug("Original Memory Serial: %s", serialStr);
-
-            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemorySerial) > 0) {
-                // Use serial from profile
-                SetStringFromProfile(serialStr, Context->CurrentProfile.MemorySerial, strlen(serialStr));
-                EgidaLogInfo("Set memory serial from profile: %s", Context->CurrentProfile.MemorySerial);
-            }
-            else {
-                // Generate random alphanumeric serial (8-16 characters)
-                ULONG serialLength = min(strlen(serialStr), 16);
-                if (serialLength < 8) serialLength = 8;
-
-                PCHAR newSerial = EgidaRandomizer::GenerateRandomAlphanumericString(serialLength);
-                if (newSerial) {
-                    SetStringFromProfile(serialStr, newSerial, strlen(serialStr));
-                    EgidaLogInfo("Set random memory serial: %s", newSerial);
-                    EGIDA_FREE(newSerial);
-                }
-            }
-        }
-        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemorySerial) > 0) {
-            // Allocate new string for null field
-            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->SerialNumber,
-                Context->CurrentProfile.MemorySerial, Context);
-            if (NT_SUCCESS(status)) {
-                EgidaLogInfo("Allocated memory serial from profile: %s", Context->CurrentProfile.MemorySerial);
-            }
-        }
+    // Randomize bank locator
+    PCHAR bankLocator = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->BankLocator);
+    if (bankLocator) {
+        EgidaLogDebug("Original bank locator: %s", bankLocator);
+        EgidaRandomizer::RandomizeString(bankLocator);
+        EgidaLogDebug("New bank locator: %s", bankLocator);
     }
 
-    // Process Part Number (String 18)
-    if (MemoryDeviceInfo->PartNumber > 0) {
-        PCHAR partStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->PartNumber);
-        if (partStr && strlen(partStr) > 0) {
-            EgidaLogDebug("Original Memory Part Number: %s", partStr);
-
-            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryPartNumber) > 0) {
-                // Use part number from profile
-                SetStringFromProfile(partStr, Context->CurrentProfile.MemoryPartNumber, strlen(partStr));
-                EgidaLogInfo("Set memory part number from profile: %s", Context->CurrentProfile.MemoryPartNumber);
-            }
-            else {
-                // Generate random part number (alphanumeric, 10-16 characters)
-                ULONG partLength = min(strlen(partStr), 16);
-                if (partLength < 10) partLength = 10;
-
-                PCHAR newPartNumber = EgidaRandomizer::GenerateRandomAlphanumericString(partLength);
-                if (newPartNumber) {
-                    SetStringFromProfile(partStr, newPartNumber, strlen(partStr));
-                    EgidaLogInfo("Set random memory part number: %s", newPartNumber);
-                    EGIDA_FREE(newPartNumber);
-                }
-            }
-        }
-        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryPartNumber) > 0) {
-            // Allocate new string for null field
-            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->PartNumber,
-                Context->CurrentProfile.MemoryPartNumber, Context);
-            if (NT_SUCCESS(status)) {
-                EgidaLogInfo("Allocated memory part number from profile: %s", Context->CurrentProfile.MemoryPartNumber);
-            }
-        }
+    // Randomize manufacturer
+    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->Manufacturer);
+    if (manufacturer) {
+        EgidaLogDebug("Original memory manufacturer: %s", manufacturer);
+        EgidaRandomizer::RandomizeString(manufacturer);
+        EgidaLogDebug("New memory manufacturer: %s", manufacturer);
     }
 
-    // Process Asset Tag (String 16)
-    if (MemoryDeviceInfo->AssetTag > 0) {
-        PCHAR assetStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->AssetTag);
-        if (assetStr && strlen(assetStr) > 0) {
-            EgidaLogDebug("Original Memory Asset Tag: %s", assetStr);
-
-            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryAssetTag) > 0) {
-                // Use asset tag from profile
-                SetStringFromProfile(assetStr, Context->CurrentProfile.MemoryAssetTag, strlen(assetStr));
-                EgidaLogInfo("Set memory asset tag from profile: %s", Context->CurrentProfile.MemoryAssetTag);
-            }
-            else {
-                // Generate random asset tag (shorter, 6-12 characters)
-                ULONG assetLength = min(strlen(assetStr), 12);
-                if (assetLength < 6) assetLength = 6;
-
-                PCHAR newAssetTag = EgidaRandomizer::GenerateRandomAlphanumericString(assetLength);
-                if (newAssetTag) {
-                    SetStringFromProfile(assetStr, newAssetTag, strlen(assetStr));
-                    EgidaLogInfo("Set random memory asset tag: %s", newAssetTag);
-                    EGIDA_FREE(newAssetTag);
-                }
-            }
-        }
-        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryAssetTag) > 0) {
-            // Allocate new string for null field
-            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->AssetTag,
-                Context->CurrentProfile.MemoryAssetTag, Context);
-            if (NT_SUCCESS(status)) {
-                EgidaLogInfo("Allocated memory asset tag from profile: %s", Context->CurrentProfile.MemoryAssetTag);
-            }
-        }
+    // Randomize asset tag
+    PCHAR assetTag = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->AssetTag);
+    if (assetTag) {
+        EgidaLogDebug("Original memory asset tag: %s", assetTag);
+        EgidaRandomizer::RandomizeString(assetTag);
+        EgidaLogDebug("New memory asset tag: %s", assetTag);
     }
 
-    // Process Device Locator (String 9)
-    if (MemoryDeviceInfo->DeviceLocator > 0) {
-        PCHAR locatorStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->DeviceLocator);
-        if (locatorStr && strlen(locatorStr) > 0) {
-            EgidaLogDebug("Original Device Locator: %s", locatorStr);
-
-            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryDeviceLocator) > 0) {
-                // Use device locator from profile
-                SetStringFromProfile(locatorStr, Context->CurrentProfile.MemoryDeviceLocator, strlen(locatorStr));
-                EgidaLogInfo("Set memory device locator from profile: %s", Context->CurrentProfile.MemoryDeviceLocator);
-            }
-            else {
-                // Generate random device locator
-                const char* locators[] = {
-                    "DIMM_A1", "DIMM_A2", "DIMM_B1", "DIMM_B2",
-                    "DIMM_C1", "DIMM_C2", "DIMM_D1", "DIMM_D2",
-                    "Channel-A-DIMM0", "Channel-B-DIMM0", "Channel-A-DIMM1", "Channel-B-DIMM1"
-                };
-                ULONG locatorIndex = EgidaRandomizer::GetRandomNumber(0, ARRAYSIZE(locators) - 1);
-                SetStringFromProfile(locatorStr, locators[locatorIndex], strlen(locatorStr));
-                EgidaLogInfo("Set random device locator: %s", locators[locatorIndex]);
-            }
-        }
-        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryDeviceLocator) > 0) {
-            // Allocate new string for null field
-            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->DeviceLocator,
-                Context->CurrentProfile.MemoryDeviceLocator, Context);
-            if (NT_SUCCESS(status)) {
-                EgidaLogInfo("Allocated device locator from profile: %s", Context->CurrentProfile.MemoryDeviceLocator);
-            }
-        }
+    // Randomize part number
+    PCHAR partNumber = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->PartNumber);
+    if (partNumber) {
+        EgidaLogDebug("Original memory part number: %s", partNumber);
+        EgidaRandomizer::RandomizeString(partNumber);
+        EgidaLogDebug("New memory part number: %s", partNumber);
     }
 
-    // Process Bank Locator (String 10)
-    if (MemoryDeviceInfo->BankLocator > 0) {
-        PCHAR bankStr = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->BankLocator);
-        if (bankStr && strlen(bankStr) > 0) {
-            EgidaLogDebug("Original Bank Locator: %s", bankStr);
-
-            if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryBankLocator) > 0) {
-                // Use bank locator from profile
-                SetStringFromProfile(bankStr, Context->CurrentProfile.MemoryBankLocator, strlen(bankStr));
-                EgidaLogInfo("Set memory bank locator from profile: %s", Context->CurrentProfile.MemoryBankLocator);
-            }
-            else {
-                // Generate random bank locator
-                const char* banks[] = {
-                    "BANK 0", "BANK 1", "BANK 2", "BANK 3",
-                    "NODE 0", "NODE 1", "P0-DIMM0", "P0-DIMM1"
-                };
-                ULONG bankIndex = EgidaRandomizer::GetRandomNumber(0, ARRAYSIZE(banks) - 1);
-                SetStringFromProfile(bankStr, banks[bankIndex], strlen(bankStr));
-                EgidaLogInfo("Set random bank locator: %s", banks[bankIndex]);
-            }
-        }
-        else if (Context->HasProfileData && strlen(Context->CurrentProfile.MemoryBankLocator) > 0) {
-            // Allocate new string for null field
-            status = AllocateAndSetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->BankLocator,
-                Context->CurrentProfile.MemoryBankLocator, Context);
-            if (NT_SUCCESS(status)) {
-                EgidaLogInfo("Allocated bank locator from profile: %s", Context->CurrentProfile.MemoryBankLocator);
-            }
-        }
+    // Randomize firmware version (if present)
+    PCHAR firmwareVersion = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->FirmwareVersion);
+    if (firmwareVersion) {
+        EgidaLogDebug("Original firmware version: %s", firmwareVersion);
+        EgidaRandomizer::RandomizeString(firmwareVersion);
+        EgidaLogDebug("New firmware version: %s", firmwareVersion);
     }
 
-    // Randomize memory error information handle for additional obfuscation
+    // Randomize serial number
+    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->SerialNumber);
+    if (serialNumber) {
+        EgidaLogDebug("Original memory serial: %s", serialNumber);
+        EgidaRandomizer::RandomizeString(serialNumber);
+        EgidaLogDebug("New memory serial: %s", serialNumber);
+    }
+
+    // Randomize memory array handle
+    MemoryDeviceInfo->MemoryArrayHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
+
+    // Randomize memory error information handle
     MemoryDeviceInfo->MemoryErrorInformationHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
-    EgidaLogDebug("Randomized memory error information handle: 0x%04X", MemoryDeviceInfo->MemoryErrorInformationHandle);
 
-    EgidaLogInfo("Memory device spoofing completed");
-    return status;
+    // Randomize manufacturer and module IDs
+    MemoryDeviceInfo->ModuleManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
+    MemoryDeviceInfo->ModuleProductID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
+    MemoryDeviceInfo->MemorySubsystemControllerManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
+    MemoryDeviceInfo->MemorySubsystemControllerProductID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
+
+    // Randomize PMIC and RCD IDs
+    MemoryDeviceInfo->Pmic0ManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
+    MemoryDeviceInfo->Pmic0RevisionNumber = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x01, 0xFF));
+    MemoryDeviceInfo->RcdManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
+    MemoryDeviceInfo->RcdRevisionNumber = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x01, 0xFF));
+
+    EgidaLogDebug("Randomized memory device handles and IDs");
+
+    return EGIDA_SUCCESS;
 }
 
 NTSTATUS SmbiosSpoofer::AllocateAndSetSmbiosString(

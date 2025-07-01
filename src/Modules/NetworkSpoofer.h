@@ -1,7 +1,8 @@
 #pragma once
 #include "../Common/Structures.h"
+#include <minwindef.h>
 
-// Network specific structures
+// Correct NDIS structures based on reference code
 typedef struct _NDIS_FILTER_BLOCK {
     struct _NDIS_FILTER_BLOCK* NextFilter;
     PUNICODE_STRING FilterInstanceName;
@@ -18,12 +19,17 @@ public:
 
 private:
     static NTSTATUS HookNetworkDrivers(_In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS HookNetworkDriversAlternative(_In_ PEGIDA_CONTEXT Context);
-    static PWCHAR ExtractAdapterName(_In_ PUNICODE_STRING InstanceName);
-    static PVOID SafeCopyMemory(_In_ PVOID Source, _In_ SIZE_T Size);
+    static NTSTATUS ChangeMacAddress(_In_ PEGIDA_CONTEXT Context);
+    static PWCHAR TrimGUID(_In_ PWCHAR guid, _In_ DWORD max);
+    static PVOID SafeCopy(_In_ PVOID src, _In_ DWORD size);
+    static DWORD Random(_Inout_ PDWORD seed);
+    static DWORD Hash(_In_ PBYTE buffer, _In_ DWORD length);
+    static VOID ShowMacAddress(_In_ PUCHAR macAddress, _In_ ULONG length);
 
     // Module state
     static PVOID s_NdisBase;
     static PVOID* s_NdisGlobalFilterList;
     static PVOID s_NdisDummyIrpHandler;
+    static PVOID s_NdisMiniDriverList;
+    static DWORD s_Seed;
 };

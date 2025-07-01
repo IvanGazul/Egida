@@ -132,14 +132,14 @@ NTSTATUS EgidaCore::StartSpoofing(_In_ PEGIDA_CONTEXT Context) {
     }
 
     // Network Spoofing
-    if (Context->Config.EnableNetworkSpoof) {
-        EgidaLogInfo("Starting Network spoofing...");
-        status = NetworkSpoofer::ExecuteSpoof(Context);
-        if (!NT_SUCCESS(status)) {
-            EgidaLogError("Network spoofing failed: 0x%08X", status);
-            return status;
-        }
-    }
+    //if (Context->Config.EnableNetworkSpoof) {
+    //    EgidaLogInfo("Starting Network spoofing...");
+    //    status = NetworkSpoofer::ExecuteSpoof(Context);
+    //    if (!NT_SUCCESS(status)) {
+    //        EgidaLogError("Network spoofing failed: 0x%08X", status);
+    //        return status;
+    //    }
+    //}
 
     // GPU Spoofing
     if (Context->Config.Flags & EGIDA_SPOOF_GPU) {
