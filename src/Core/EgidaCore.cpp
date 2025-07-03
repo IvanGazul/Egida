@@ -2,17 +2,17 @@
 #include "../Modules/SmbiosSpoofer.h"
 #include "../Modules/DiskSpoofer.h"
 #include "../Modules/NetworkSpoofer.h"
-#include "../Modules/GpuSpoofer.h"
 #include "../Utils/EgidaUtils.h"
-#include "../Core/Logger.h"
-#include "../Common/Globals.h"
 
-// Static context for EgidaCore class
-PEGIDA_CONTEXT EgidaCore::g_EgidaContext = nullptr;
+// Global context
+PEGIDA_CONTEXT g_EgidaGlobalContext = nullptr;
+
+// Device dispatch routines
+NTSTATUS EgidaCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
+NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 
 NTSTATUS EgidaCore::Initialize(_Out_ PEGIDA_CONTEXT* Context) {
     EGIDA_PAGED_CODE();
-
     EgidaLogInfo("Initializing Egida Core...");
 
     if (!Context) {
@@ -24,36 +24,12 @@ NTSTATUS EgidaCore::Initialize(_Out_ PEGIDA_CONTEXT* Context) {
     PEGIDA_CONTEXT context = static_cast<PEGIDA_CONTEXT>(
         EGIDA_ALLOC_NON_PAGED(sizeof(EGIDA_CONTEXT))
         );
-
     if (!context) {
         EgidaLogError("Failed to allocate context");
         return EGIDA_INSUFFICIENT_RESOURCES;
     }
-
     RtlZeroMemory(context, sizeof(EGIDA_CONTEXT));
-
-    // Initialize spin lock
     KeInitializeSpinLock(&context->SpinLock);
-
-    // Set default configuration
-    context->Config.Flags = EGIDA_SPOOF_ALL;
-    context->Config.EnableSmbiosSpoof = TRUE;
-    context->Config.EnableDiskSpoof = TRUE;
-    context->Config.EnableNetworkSpoof = TRUE;
-    context->Config.EnableBootInfoSpoof = TRUE;
-
-    // Initialize randomization config
-    context->Config.RandomConfig.RandomizeStrings = TRUE;
-    context->Config.RandomConfig.RandomizeSerials = TRUE;
-    context->Config.RandomConfig.RandomizeMAC = TRUE;
-    context->Config.RandomConfig.RandomizeUUID = TRUE;
-    context->Config.RandomConfig.MinStringLength = 8;
-    context->Config.RandomConfig.MaxStringLength = 16;
-    context->Config.RandomConfig.RandomSeed = static_cast<UINT32>(KeQueryTimeIncrement());
-
-    // Initialize profile data fields
-    context->HasProfileData = FALSE;
-    RtlZeroMemory(&context->CurrentProfile, sizeof(PROFILE_DATA));
 
     // Initialize modules
     NTSTATUS status = InitializeModules(context);
@@ -64,10 +40,11 @@ NTSTATUS EgidaCore::Initialize(_Out_ PEGIDA_CONTEXT* Context) {
     }
 
     context->IsInitialized = TRUE;
-    g_EgidaContext = context;
+    context->IsSpoofingActive = FALSE;
+    context->HasProfile = FALSE;
     *Context = context;
 
-    EgidaLogInfo("Egida Core initialized successfully");
+    EgidaLogInfo("Egida Core initialized - waiting for profile from UserMode");
     return EGIDA_SUCCESS;
 }
 
@@ -80,9 +57,10 @@ NTSTATUS EgidaCore::Cleanup(_In_ PEGIDA_CONTEXT Context) {
 
     EgidaLogInfo("Cleaning up Egida Core...");
 
-    // Stop spoofing if active
-    if (Context->IsSpoofingActive) {
-        StopSpoofing(Context);
+    // Free profile data if allocated
+    if (Context->ProfileData) {
+        EGIDA_FREE(Context->ProfileData);
+        Context->ProfileData = nullptr;
     }
 
     // Cleanup modules
@@ -90,157 +68,53 @@ NTSTATUS EgidaCore::Cleanup(_In_ PEGIDA_CONTEXT Context) {
 
     // Free context
     EGIDA_FREE(Context);
-    g_EgidaContext = nullptr;
+    g_EgidaGlobalContext = nullptr;
 
     EgidaLogInfo("Egida Core cleanup completed");
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS EgidaCore::StartSpoofing(_In_ PEGIDA_CONTEXT Context) {
+NTSTATUS EgidaCore::ExecuteAllSpoofs(_In_ PEGIDA_CONTEXT Context) {
     if (!Context || !Context->IsInitialized) {
-        EgidaLogError("Context not initialized");
+        EgidaLogError("Context not initialized for spoofing");
         return EGIDA_FAILED;
     }
 
-    if (Context->IsSpoofingActive) {
-        EgidaLogWarning("Spoofing already active");
-        return EGIDA_SUCCESS;
+    if (!Context->HasProfile || !Context->ProfileData) {
+        EgidaLogError("No profile data available for spoofing");
+        return EGIDA_FAILED;
     }
 
-    EgidaLogInfo("Starting HWID spoofing...");
-
+    EgidaLogInfo("Starting HWID spoofing with provided profile...");
     NTSTATUS status = EGIDA_SUCCESS;
 
     // SMBIOS Spoofing
-    if (Context->Config.EnableSmbiosSpoof) {
-        EgidaLogInfo("Starting SMBIOS spoofing...");
-        status = SmbiosSpoofer::ExecuteSpoof(Context);
-        if (!NT_SUCCESS(status)) {
-            EgidaLogError("SMBIOS spoofing failed: 0x%08X", status);
-            return status;
-        }
-    }
-
-    // Disk Spoofing
-    if (Context->Config.EnableDiskSpoof) {
-        EgidaLogInfo("Starting Disk spoofing...");
-        status = DiskSpoofer::ExecuteSpoof(Context);
-        if (!NT_SUCCESS(status)) {
-            EgidaLogError("Disk spoofing failed: 0x%08X", status);
-            return status;
-        }
-    }
-
-    // Network Spoofing
-    //if (Context->Config.EnableNetworkSpoof) {
-    //    EgidaLogInfo("Starting Network spoofing...");
-    //    status = NetworkSpoofer::ExecuteSpoof(Context);
-    //    if (!NT_SUCCESS(status)) {
-    //        EgidaLogError("Network spoofing failed: 0x%08X", status);
-    //        return status;
-    //    }
-    //}
-
-    // GPU Spoofing
-    if (Context->Config.Flags & EGIDA_SPOOF_GPU) {
-        EgidaLogInfo("Starting GPU spoofing...");
-        status = GpuSpoofer::ExecuteSpoof(Context);
-        if (!NT_SUCCESS(status)) {
-            EgidaLogError("GPU spoofing failed: 0x%08X", status);
-            return status;
-        }
-    }
-
-    Context->IsSpoofingActive = TRUE;
-    EgidaLogInfo("HWID spoofing started successfully");
-
-    return EGIDA_SUCCESS;
-}
-
-NTSTATUS EgidaCore::StopSpoofing(_In_ PEGIDA_CONTEXT Context) {
-    if (!Context) {
-        return EGIDA_FAILED;
-    }
-
-    if (!Context->IsSpoofingActive) {
-        return EGIDA_SUCCESS;
-    }
-
-    EgidaLogInfo("Stopping HWID spoofing...");
-
-    // Stop individual modules
-    if (Context->Config.Flags & EGIDA_SPOOF_GPU) {
-        GpuSpoofer::StopSpoof(Context);
-    }
-
-    if (Context->Config.EnableNetworkSpoof) {
-        NetworkSpoofer::StopSpoof(Context);
-    }
-
-    if (Context->Config.EnableDiskSpoof) {
-        DiskSpoofer::StopSpoof(Context);
-    }
-
-    if (Context->Config.EnableSmbiosSpoof) {
-        SmbiosSpoofer::StopSpoof(Context);
-    }
-
-    Context->IsSpoofingActive = FALSE;
-    EgidaLogInfo("HWID spoofing stopped");
-
-    return EGIDA_SUCCESS;
-}
-
-NTSTATUS EgidaCore::StartGPUSpoofing(_In_ PEGIDA_CONTEXT Context) {
-    if (!Context || !Context->IsInitialized) {
-        EgidaLogError("Context not initialized");
-        return EGIDA_FAILED;
-    }
-
-    EgidaLogInfo("Starting GPU spoofing only...");
-
-    // Enable GPU spoofing flag
-    Context->Config.Flags |= EGIDA_SPOOF_GPU;
-
-    NTSTATUS status = GpuSpoofer::ExecuteSpoof(Context);
+    EgidaLogInfo("Starting SMBIOS spoofing...");
+    status = SmbiosSpoofer::ExecuteSpoof(Context);
     if (!NT_SUCCESS(status)) {
-        EgidaLogError("GPU spoofing failed: 0x%08X", status);
+        EgidaLogError("SMBIOS spoofing failed: 0x%08X", status);
         return status;
     }
 
-    EgidaLogInfo("GPU spoofing started successfully");
+    // Disk Spoofing
+    EgidaLogInfo("Starting Disk spoofing...");
+    status = DiskSpoofer::ExecuteSpoof(Context);
+    if (!NT_SUCCESS(status)) {
+        EgidaLogError("Disk spoofing failed: 0x%08X", status);
+        //return status;
+    }
+
+    // Network Spoofing
+    EgidaLogInfo("Starting Network spoofing...");
+    status = NetworkSpoofer::ExecuteSpoof(Context);
+    if (!NT_SUCCESS(status)) {
+        EgidaLogError("Network spoofing failed: 0x%08X", status);
+        return status;
+    }
+
+    Context->IsSpoofingActive = TRUE;
+    EgidaLogInfo("HWID spoofing completed successfully");
     return EGIDA_SUCCESS;
-}
-
-NTSTATUS EgidaCore::StopGPUSpoofing(_In_ PEGIDA_CONTEXT Context) {
-    if (!Context) {
-        return EGIDA_FAILED;
-    }
-
-    EgidaLogInfo("Stopping GPU spoofing...");
-
-    NTSTATUS status = GpuSpoofer::StopSpoof(Context);
-    if (NT_SUCCESS(status)) {
-        Context->Config.Flags &= ~EGIDA_SPOOF_GPU;
-        EgidaLogInfo("GPU spoofing stopped");
-    }
-
-    return status;
-}
-
-NTSTATUS EgidaCore::GetGPUStatus(_In_ PEGIDA_CONTEXT Context, _Out_ PEGIDA_STATUS Status) {
-    if (!Context || !Status) {
-        return EGIDA_FAILED;
-    }
-
-    // Use the regular GetStatus but focus on GPU info
-    NTSTATUS status = GetStatus(Context, Status);
-    if (NT_SUCCESS(status)) {
-        // Additional GPU-specific status info could be added here
-        EgidaLogDebug("GPU status: %s", (Status->SpoofedComponents & EGIDA_SPOOF_GPU) ? "Active" : "Inactive");
-    }
-
-    return status;
 }
 
 NTSTATUS EgidaCore::InitializeModules(_In_ PEGIDA_CONTEXT Context) {
@@ -253,7 +127,7 @@ NTSTATUS EgidaCore::InitializeModules(_In_ PEGIDA_CONTEXT Context) {
         return status;
     }
 
-    // Initialize Disk Spoofer  
+    // Initialize Disk Spoofer
     status = DiskSpoofer::Initialize(Context);
     if (!NT_SUCCESS(status)) {
         EgidaLogError("Failed to initialize Disk spoofer: 0x%08X", status);
@@ -267,352 +141,215 @@ NTSTATUS EgidaCore::InitializeModules(_In_ PEGIDA_CONTEXT Context) {
         return status;
     }
 
-    // Initialize GPU Spoofer
-    status = GpuSpoofer::Initialize(Context);
-    if (!NT_SUCCESS(status)) {
-        EgidaLogError("Failed to initialize GPU spoofer: 0x%08X", status);
-        return status;
-    }
-
+    Context->IsInitialized = TRUE;
     return EGIDA_SUCCESS;
 }
 
 VOID EgidaCore::CleanupModules(_In_ PEGIDA_CONTEXT Context) {
-    if (Context->Config.Flags & EGIDA_SPOOF_GPU) {
-        GpuSpoofer::Cleanup(Context);
-    }
-
-    if (Context->Config.EnableSmbiosSpoof) {
-        SmbiosSpoofer::Cleanup(Context);
-    }
-
-    if (Context->Config.EnableDiskSpoof) {
-        DiskSpoofer::Cleanup(Context);
-    }
-
-    if (Context->Config.EnableNetworkSpoof) {
-        NetworkSpoofer::Cleanup(Context);
-    }
+    SmbiosSpoofer::Cleanup(Context);
+    DiskSpoofer::Cleanup(Context);
+    NetworkSpoofer::Cleanup(Context);
 }
 
-NTSTATUS EgidaCore::SetProfileData(_In_ PEGIDA_CONTEXT Context, _In_ PPROFILE_DATA ProfileData) {
-    if (!Context || !ProfileData) {
-        EgidaLogError("Invalid parameters for SetProfileData");
-        return EGIDA_FAILED;
-    }
+// Driver entry points implementation
+extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
+    UNREFERENCED_PARAMETER(RegistryPath);
 
-    // Validate profile data
-    NTSTATUS status = ValidateProfileData(ProfileData);
+    EgidaLogInitialize();
+    EgidaLogInfo("Egida Driver v%s loading...", EGIDA_VERSION);
+
+    // Set dispatch routines
+    DriverObject->DriverUnload = EgidaUnloadDriver;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = EgidaCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = EgidaCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = EgidaDeviceControl;
+
+    // Create device
+    UNICODE_STRING deviceName = RTL_CONSTANT_STRING(DEVICE_NAME);
+    UNICODE_STRING symbolicLink = RTL_CONSTANT_STRING(SYMBOLIC_LINK);
+
+    PDEVICE_OBJECT deviceObject = nullptr;
+    NTSTATUS status = IoCreateDevice(
+        DriverObject,
+        0,
+        &deviceName,
+        FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN,
+        FALSE,
+        &deviceObject
+    );
+
     if (!NT_SUCCESS(status)) {
-        EgidaLogError("Profile data validation failed: 0x%08X", status);
+        EgidaLogError("Failed to create device: 0x%08X", status);
+        EgidaLogCleanup();
         return status;
     }
 
-    EgidaLogInfo("=== SETTING PROFILE DATA ===");
-    EgidaLogInfo("Profile Name: %s", ProfileData->ProfileName);
-    EgidaLogInfo("Random Seed: %lu", ProfileData->RandomSeed);
+    // Create symbolic link
+    status = IoCreateSymbolicLink(&symbolicLink, &deviceName);
+    if (!NT_SUCCESS(status)) {
+        EgidaLogError("Failed to create symbolic link: 0x%08X", status);
+        IoDeleteDevice(deviceObject);
+        EgidaLogCleanup();
+        return status;
+    }
 
-    // Log SMBIOS values
-    EgidaLogInfo("--- SMBIOS Profile Values ---");
-    EgidaLogInfo("Motherboard Serial: %s", ProfileData->MotherboardSerial);
-    EgidaLogInfo("System Manufacturer: %s", ProfileData->SystemManufacturer);
-    EgidaLogInfo("System Product: %s", ProfileData->SystemProductName);
-    EgidaLogInfo("System Serial: %s", ProfileData->SystemSerialNumber);
-    EgidaLogInfo("System UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-        ProfileData->SystemUUID[0], ProfileData->SystemUUID[1], ProfileData->SystemUUID[2], ProfileData->SystemUUID[3],
-        ProfileData->SystemUUID[4], ProfileData->SystemUUID[5], ProfileData->SystemUUID[6], ProfileData->SystemUUID[7],
-        ProfileData->SystemUUID[8], ProfileData->SystemUUID[9], ProfileData->SystemUUID[10], ProfileData->SystemUUID[11],
-        ProfileData->SystemUUID[12], ProfileData->SystemUUID[13], ProfileData->SystemUUID[14], ProfileData->SystemUUID[15]);
+    // Initialize core
+    status = EgidaCore::Initialize(&g_EgidaGlobalContext);
+    if (!NT_SUCCESS(status)) {
+        EgidaLogError("Failed to initialize core: 0x%08X", status);
+        IoDeleteSymbolicLink(&symbolicLink);
+        IoDeleteDevice(deviceObject);
+        EgidaLogCleanup();
+        return status;
+    }
 
-    // Log Disk values
-    EgidaLogInfo("--- Disk Profile Values ---");
-    EgidaLogInfo("Disk Serial: %s", ProfileData->DiskSerial);
-    EgidaLogInfo("Disk Model: %s", ProfileData->DiskModel);
-    EgidaLogInfo("Disk Vendor: %s", ProfileData->DiskVendor);
+    g_EgidaGlobalContext->DeviceObject = deviceObject;
+    deviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 
-    // Log Network values
-    EgidaLogInfo("--- Network Profile Values ---");
-    EgidaLogInfo("MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
-        ProfileData->MacAddress[0], ProfileData->MacAddress[1], ProfileData->MacAddress[2],
-        ProfileData->MacAddress[3], ProfileData->MacAddress[4], ProfileData->MacAddress[5]);
-
-    // Log GPU values
-    EgidaLogInfo("--- GPU Profile Values ---");
-    EgidaLogInfo("GPU Description: %s", ProfileData->GpuDescription);
-    EgidaLogInfo("GPU PNP ID: %s", ProfileData->GpuPNPID);
-
-    // Log BIOS values
-    EgidaLogInfo("--- BIOS Profile Values ---");
-    EgidaLogInfo("BIOS Vendor: %s", ProfileData->BiosVendor);
-    EgidaLogInfo("BIOS Version: %s", ProfileData->BiosVersion);
-    EgidaLogInfo("BIOS Date: %s", ProfileData->BiosReleaseDate);
-
-    KIRQL oldIrql;
-    KeAcquireSpinLock(&Context->SpinLock, &oldIrql);
-
-    // Copy profile data to context
-    RtlCopyMemory(&Context->CurrentProfile, ProfileData, sizeof(PROFILE_DATA));
-    Context->HasProfileData = TRUE;
-
-    KeReleaseSpinLock(&Context->SpinLock, oldIrql);
-
-    EgidaLogInfo("Profile data stored in context successfully");
-    EgidaLogInfo("=== PROFILE DATA SET COMPLETE ===");
-
+    EgidaLogInfo("Egida Driver loaded successfully. Waiting for profile...");
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS EgidaCore::ValidateProfileData(_In_ PPROFILE_DATA ProfileData) {
-    if (!ProfileData) {
-        EgidaLogError("ProfileData pointer is NULL");
-        return EGIDA_FAILED;
+extern "C" VOID EgidaUnloadDriver(_In_ PDRIVER_OBJECT DriverObject) {
+    UNREFERENCED_PARAMETER(DriverObject);
+
+    EgidaLogInfo("Unloading Egida Driver...");
+
+    UNICODE_STRING symbolicLink = RTL_CONSTANT_STRING(SYMBOLIC_LINK);
+    IoDeleteSymbolicLink(&symbolicLink);
+
+    if (g_EgidaGlobalContext) {
+        if (g_EgidaGlobalContext->DeviceObject) {
+            IoDeleteDevice(g_EgidaGlobalContext->DeviceObject);
+        }
+        EgidaCore::Cleanup(g_EgidaGlobalContext);
+        g_EgidaGlobalContext = nullptr;
     }
 
-    EgidaLogDebug("=== PROFILE VALIDATION DEBUG ===");
-    EgidaLogDebug("Profile address: 0x%p", ProfileData);
-    EgidaLogDebug("Profile IsValid field: %d (0x%02X)", ProfileData->IsValid, ProfileData->IsValid);
-    EgidaLogDebug("Profile Checksum: 0x%08X", ProfileData->Checksum);
-    EgidaLogDebug("Profile Name length: %zu", strnlen(ProfileData->ProfileName, sizeof(ProfileData->ProfileName)));
-    EgidaLogDebug("Profile Name: '%.63s'", ProfileData->ProfileName);
-
-    // Check if profile is marked as valid
-    if (!ProfileData->IsValid) {
-        EgidaLogError("Profile data marked as invalid (IsValid = %d)", ProfileData->IsValid);
-        return EGIDA_FAILED;
-    }
-
-    // Verify checksum
-    UINT32 calculatedChecksum = CalculateProfileChecksum(ProfileData);
-    EgidaLogDebug("Calculated checksum: 0x%08X", calculatedChecksum);
-
-    if (calculatedChecksum != ProfileData->Checksum) {
-        EgidaLogError("Profile checksum mismatch: expected 0x%08X, got 0x%08X",
-            ProfileData->Checksum, calculatedChecksum);
-        return EGIDA_FAILED;
-    }
-
-    // Validate profile name
-    SIZE_T nameLength = strnlen(ProfileData->ProfileName, sizeof(ProfileData->ProfileName));
-    if (nameLength == 0) {
-        EgidaLogError("Profile name is empty");
-        return EGIDA_FAILED;
-    }
-
-    // Log some profile content for verification
-    EgidaLogDebug("System Serial: '%.63s'", ProfileData->SystemSerialNumber);
-    EgidaLogDebug("Disk Serial: '%.63s'", ProfileData->DiskSerial);
-    EgidaLogDebug("=== PROFILE VALIDATION PASSED ===");
-
-    EgidaLogInfo("Profile data validation passed");
-    return EGIDA_SUCCESS;
+    EgidaLogCleanup();
 }
 
-UINT32 EgidaCore::CalculateProfileChecksum(_In_ PPROFILE_DATA ProfileData) {
-    if (!ProfileData) {
-        return 0;
-    }
-
-    UINT32 checksum = 0;
-    UINT32 originalChecksum = ProfileData->Checksum;
-
-    // Temporarily clear checksum for calculation
-    ProfileData->Checksum = 0;
-
-    // Simple checksum calculation
-    PUCHAR data = reinterpret_cast<PUCHAR>(ProfileData);
-    SIZE_T size = sizeof(PROFILE_DATA);
-
-    for (SIZE_T i = 0; i < size; i++) {
-        checksum += data[i];
-        checksum = (checksum << 1) | (checksum >> 31); // Rotate left
-    }
-
-    // Restore original checksum
-    ProfileData->Checksum = originalChecksum;
-
-    return checksum;
-}
-
-NTSTATUS EgidaCore::HandleDeviceControl(
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP Irp
-) {
+// Device dispatch routines
+NTSTATUS EgidaCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
     UNREFERENCED_PARAMETER(DeviceObject);
 
-    PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
-    NTSTATUS status = EGIDA_SUCCESS;
-    ULONG bytesReturned = 0;
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-    EgidaLogDebug("Received IOCTL: 0x%08X", irpSp->Parameters.DeviceIoControl.IoControlCode);
+    return STATUS_SUCCESS;
+}
 
-    switch (irpSp->Parameters.DeviceIoControl.IoControlCode) {
-    case IOCTL_EGIDA_START_SPOOF:
-        EgidaLogInfo("Processing START_SPOOF command");
-        status = StartSpoofing(g_EgidaGlobalContext);
-        break;
+NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
+    UNREFERENCED_PARAMETER(DeviceObject);
 
-    case IOCTL_EGIDA_STOP_SPOOF:
-        EgidaLogInfo("Processing STOP_SPOOF command");
-        status = StopSpoofing(g_EgidaGlobalContext);
-        break;
+    PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+    ULONG_PTR information = 0;
 
-    case IOCTL_EGIDA_GET_STATUS:
-        EgidaLogDebug("Processing GET_STATUS command");
-        if (irpSp->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(EGIDA_STATUS)) {
-            PEGIDA_STATUS statusInfo = static_cast<PEGIDA_STATUS>(Irp->AssociatedIrp.SystemBuffer);
-            status = GetStatus(g_EgidaGlobalContext, statusInfo);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(EGIDA_STATUS);
-            }
-        }
-        else {
+    if (!g_EgidaGlobalContext) {
+        EgidaLogError("Global context is null");
+        status = STATUS_DEVICE_NOT_READY;
+        goto Complete;
+    }
+
+    switch (irpStack->Parameters.DeviceIoControl.IoControlCode) {
+    case IOCTL_EGIDA_SET_PROFILE: {
+        EgidaLogInfo("Received SET_PROFILE IOCTL");
+
+        ULONG inputSize = irpStack->Parameters.DeviceIoControl.InputBufferLength;
+        ULONG expectedSize = sizeof(SMBIOS_PROFILE_DATA);
+
+        EgidaLogDebug("Profile data size - received: %lu, expected: %lu", inputSize, expectedSize);
+
+        if (inputSize < expectedSize) {
+            EgidaLogError("Invalid profile data size: %lu (expected: %lu)", inputSize, expectedSize);
             status = STATUS_BUFFER_TOO_SMALL;
-            EgidaLogError("Buffer too small for status structure");
+            break;
         }
+
+        // Free existing profile if any
+        if (g_EgidaGlobalContext->ProfileData) {
+            EGIDA_FREE(g_EgidaGlobalContext->ProfileData);
+            g_EgidaGlobalContext->ProfileData = nullptr;
+        }
+
+        // If spoofing was active, stop it first
+        if (g_EgidaGlobalContext->IsSpoofingActive) {
+            EgidaLogInfo("Stopping active spoofing before applying new profile");
+            SmbiosSpoofer::StopSpoof(g_EgidaGlobalContext);
+            DiskSpoofer::StopSpoof(g_EgidaGlobalContext);
+            NetworkSpoofer::StopSpoof(g_EgidaGlobalContext);
+            g_EgidaGlobalContext->IsSpoofingActive = FALSE;
+        }
+
+        // Allocate and copy new profile
+        g_EgidaGlobalContext->ProfileData = static_cast<PSMBIOS_PROFILE_DATA>(
+            EGIDA_ALLOC_NON_PAGED(sizeof(SMBIOS_PROFILE_DATA))
+            );
+
+        if (!g_EgidaGlobalContext->ProfileData) {
+            EgidaLogError("Failed to allocate profile data");
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        RtlCopyMemory(
+            g_EgidaGlobalContext->ProfileData,
+            Irp->AssociatedIrp.SystemBuffer,
+            sizeof(SMBIOS_PROFILE_DATA)
+        );
+
+        g_EgidaGlobalContext->HasProfile = TRUE;
+        EgidaLogInfo("Profile data set successfully");
+        status = STATUS_SUCCESS;
         break;
+    }
 
-    case IOCTL_EGIDA_SET_CONFIG:
-        EgidaLogInfo("Processing SET_CONFIG command");
-        if (irpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(SPOOF_CONFIGURATION)) {
-            PSPOOF_CONFIGURATION config = static_cast<PSPOOF_CONFIGURATION>(Irp->AssociatedIrp.SystemBuffer);
-            status = SetConfiguration(g_EgidaGlobalContext, config);
+    case IOCTL_EGIDA_EXECUTE_SPOOF: {
+        EgidaLogInfo("Received EXECUTE_SPOOF IOCTL");
+
+        if (!g_EgidaGlobalContext->HasProfile) {
+            EgidaLogError("No profile data available");
+            status = STATUS_INVALID_DEVICE_STATE;
+            break;
         }
-        else {
-            status = STATUS_BUFFER_TOO_SMALL;
-            EgidaLogError("Buffer too small for configuration structure");
-        }
+
+        status = EgidaCore::ExecuteAllSpoofs(g_EgidaGlobalContext);
         break;
+    }
 
-    case IOCTL_EGIDA_SET_PROFILE_DATA:
-        EgidaLogInfo("Processing SET_PROFILE_DATA command");
-        if (irpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(PROFILE_DATA)) {
-            PPROFILE_DATA profileData = static_cast<PPROFILE_DATA>(Irp->AssociatedIrp.SystemBuffer);
+    case IOCTL_EGIDA_STOP_SPOOF: {
+        EgidaLogInfo("Received STOP_SPOOF IOCTL");
 
-            EgidaLogInfo("=== RAW PROFILE DATA RECEIVED ===");
-            EgidaLogInfo("Input buffer length: %lu", irpSp->Parameters.DeviceIoControl.InputBufferLength);
-            EgidaLogInfo("Expected size: %lu", sizeof(PROFILE_DATA));
-            EgidaLogInfo("Profile pointer: 0x%p", profileData);
-
-
-            // Try to read the profile name first (it should be readable)
-            CHAR tempName[65] = { 0 };
-            RtlCopyMemory(tempName, profileData->ProfileName, 64);
-            EgidaLogInfo("Profile name from raw data: '%s'", tempName);
-
-            // Now try the normal processing
-            status = SetProfileData(g_EgidaGlobalContext, profileData);
+        if (!g_EgidaGlobalContext->IsSpoofingActive) {
+            EgidaLogWarning("Spoofing is not active");
+            status = STATUS_INVALID_DEVICE_STATE;
+            break;
         }
-        else {
-            status = STATUS_BUFFER_TOO_SMALL;
-            EgidaLogError("Buffer too small for profile data structure, got %lu, need %lu",
-                irpSp->Parameters.DeviceIoControl.InputBufferLength, sizeof(PROFILE_DATA));
-        }
-        break;
 
-    case IOCTL_EGIDA_START_GPU_SPOOF:
-        EgidaLogInfo("Processing START_GPU_SPOOF command");
-        status = StartGPUSpoofing(g_EgidaGlobalContext);
-        break;
+        // Stop spoofing in each module
+        SmbiosSpoofer::StopSpoof(g_EgidaGlobalContext);
+        DiskSpoofer::StopSpoof(g_EgidaGlobalContext);
+        NetworkSpoofer::StopSpoof(g_EgidaGlobalContext);
 
-    case IOCTL_EGIDA_STOP_GPU_SPOOF:
-        EgidaLogInfo("Processing STOP_GPU_SPOOF command");
-        status = StopGPUSpoofing(g_EgidaGlobalContext);
+        g_EgidaGlobalContext->IsSpoofingActive = FALSE;
+        EgidaLogInfo("Spoofing stopped");
+        status = STATUS_SUCCESS;
         break;
-
-    case IOCTL_EGIDA_GET_GPU_STATUS:
-        EgidaLogDebug("Processing GET_GPU_STATUS command");
-        if (irpSp->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(EGIDA_STATUS)) {
-            PEGIDA_STATUS statusInfo = static_cast<PEGIDA_STATUS>(Irp->AssociatedIrp.SystemBuffer);
-            status = GetGPUStatus(g_EgidaGlobalContext, statusInfo);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(EGIDA_STATUS);
-            }
-        }
-        else {
-            status = STATUS_BUFFER_TOO_SMALL;
-            EgidaLogError("Buffer too small for GPU status structure");
-        }
-        break;
+    }
 
     default:
-        EgidaLogWarning("Unknown IOCTL code: 0x%08X", irpSp->Parameters.DeviceIoControl.IoControlCode);
+        EgidaLogWarning("Unknown IOCTL: 0x%08X", irpStack->Parameters.DeviceIoControl.IoControlCode);
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }
 
-    EgidaLogDebug("IOCTL completed with status: 0x%08X, bytes returned: %lu", status, bytesReturned);
-
+Complete:
     Irp->IoStatus.Status = status;
-    Irp->IoStatus.Information = bytesReturned;
+    Irp->IoStatus.Information = information;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
     return status;
-}
-
-NTSTATUS EgidaCore::SetConfiguration(_In_ PEGIDA_CONTEXT Context, _In_ PSPOOF_CONFIGURATION Config) {
-    if (!Context || !Config) {
-        EgidaLogError("Invalid parameters for SetConfiguration");
-        return EGIDA_FAILED;
-    }
-
-    EgidaLogInfo("Updating configuration...");
-    EgidaLogDebug("Flags: 0x%08X", Config->Flags);
-    EgidaLogDebug("SMBIOS: %s", Config->EnableSmbiosSpoof ? "Enabled" : "Disabled");
-    EgidaLogDebug("Disk: %s", Config->EnableDiskSpoof ? "Enabled" : "Disabled");
-    EgidaLogDebug("Network: %s", Config->EnableNetworkSpoof ? "Enabled" : "Disabled");
-    EgidaLogDebug("Boot Info: %s", Config->EnableBootInfoSpoof ? "Enabled" : "Disabled");
-    EgidaLogDebug("Random Seed: %lu", Config->RandomConfig.RandomSeed);
-
-    KIRQL oldIrql;
-    KeAcquireSpinLock(&Context->SpinLock, &oldIrql);
-
-    // Copy configuration
-    RtlCopyMemory(&Context->Config, Config, sizeof(SPOOF_CONFIGURATION));
-
-    KeReleaseSpinLock(&Context->SpinLock, oldIrql);
-
-    EgidaLogInfo("Configuration updated successfully");
-    return EGIDA_SUCCESS;
-}
-
-NTSTATUS EgidaCore::GetStatus(_In_ PEGIDA_CONTEXT Context, _Out_ PEGIDA_STATUS Status) {
-    if (!Context || !Status) {
-        EgidaLogError("Invalid parameters for GetStatus");
-        return EGIDA_FAILED;
-    }
-
-    RtlZeroMemory(Status, sizeof(EGIDA_STATUS));
-
-    Status->IsActive = Context->IsSpoofingActive;
-    Status->SpoofedComponents = 0;
-
-    // Determine which components are spoofed
-    if (Context->Config.EnableSmbiosSpoof) Status->SpoofedComponents |= EGIDA_SPOOF_SMBIOS;
-    if (Context->Config.EnableDiskSpoof) Status->SpoofedComponents |= EGIDA_SPOOF_DISK;
-    if (Context->Config.EnableNetworkSpoof) Status->SpoofedComponents |= EGIDA_SPOOF_NETWORK;
-    if (Context->Config.Flags & EGIDA_SPOOF_GPU) Status->SpoofedComponents |= EGIDA_SPOOF_GPU;
-
-    // Memory statistics
-    Status->SmbiosAllocatedCount = Context->SmbiosAllocatedStringCount;
-    Status->DiskAllocatedCount = Context->DiskAllocatedStringCount;
-    Status->AllocatedStringsCount = Status->SmbiosAllocatedCount + Status->DiskAllocatedCount;
-
-    // GPU statistics
-    if (Context->GpuContext) {
-        Status->GpuDevicesCount = Context->GpuContext->DeviceCount;
-    }
-    else {
-        Status->GpuDevicesCount = 0;
-    }
-
-    // Copy version string
-    RtlStringCbCopyA(Status->Version, sizeof(Status->Version), EGIDA_VERSION);
-
-    // Last error (for now, always success)
-    Status->LastError = 0;
-
-    EgidaLogDebug("Status retrieved - Active: %s, Components: 0x%08X",
-        Status->IsActive ? "Yes" : "No", Status->SpoofedComponents);
-
-    return EGIDA_SUCCESS;
 }

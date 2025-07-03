@@ -13,46 +13,52 @@
 
 class SmbiosSpoofer {
 public:
+    // --- Публичный интерфейс остался без изменений ---
     static NTSTATUS Initialize(_In_ PEGIDA_CONTEXT Context);
     static NTSTATUS ExecuteSpoof(_In_ PEGIDA_CONTEXT Context);
     static NTSTATUS StopSpoof(_In_ PEGIDA_CONTEXT Context);
     static VOID Cleanup(_In_ PEGIDA_CONTEXT Context);
 
 private:
+    // --- Приватные методы обновлены для соответствия новой логике пересборки ---
 
-    static NTSTATUS ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS LoopSmbiosTables(_In_ PVOID MappedBase, _In_ ULONG TableSize, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS AllocateAndSetSmbiosString(
-        _In_ PSMBIOS_HEADER Header,
-        _In_ SMBIOS_STRING StringNumber,
-        _In_ PCSTR NewValue,
-        _In_ PEGIDA_CONTEXT Context
-    );
-    
-    static VOID FreeSmbiosAllocatedStrings(_In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS TrackAllocatedSmbiosString(
-        _In_ PEGIDA_CONTEXT Context,
-        _In_ PCHAR StringPointer,
-        _In_ SIZE_T StringSize,
-        _In_ PSMBIOS_HEADER Header,
-        _In_ SMBIOS_STRING StringNumber
-    );
+    /**
+     * @brief Итерируется по оригинальной таблице SMBIOS и пересобирает её в новом буфере.
+     * @param ReadBase Указатель на начало оригинальной (читаемой) таблицы.
+     * @param ReadSize Размер оригинальной таблицы.
+     * @param WriteBase Указатель на начало нового (записываемого) буфера.
+     * @param WriteSize Размер нового буфера.
+     * @param FinalSize Выходной параметр для итогового размера пересобранной таблицы.
+     * @param Context Контекст драйвера.
+     * @return NTSTATUS.
+     */
+    static NTSTATUS LoopAndRebuildSmbiosTables(_In_ PVOID ReadBase, _In_ ULONG ReadSize, _In_ PVOID WriteBase, _In_ ULONG WriteSize, _Out_ PULONG FinalSize, _In_ PEGIDA_CONTEXT Context);
 
-    static VOID SetStringFromProfile(_In_ PCHAR Buffer, _In_ PCSTR ProfileValue, _In_ UINT32 MaxLength);
+    /**
+     * @brief Обрабатывает одну структуру SMBIOS, копируя и модифицируя её в новый буфер.
+     * @param ReadHeader Указатель на заголовок структуры в оригинальной таблице.
+     * @param WritePtr Указатель на текущую позицию для записи в новом буфере.
+     * @param BufferEnd Указатель на конец нового буфера для проверки границ.
+     * @param Context Контекст драйвера.
+     * @return NTSTATUS.
+     */
+    static NTSTATUS ProcessAndRebuildTable(_In_ PSMBIOS_HEADER ReadHeader, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context);
 
-    // Individual table processors
-    static NTSTATUS ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO BiosInfo, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS ProcessSystemInfo(_In_ PSMBIOS_SYSTEM_INFO SystemInfo, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO BaseboardInfo, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ChassisInfo, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS ProcessProcessorInfo(_In_ PSMBIOS_PROCESSOR_INFO ProcessorInfo, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS ProcessMemoryArrayInfo(_In_ PSMBIOS_MEMORY_ARRAY_INFO MemoryArrayInfo, _In_ PEGIDA_CONTEXT Context);
-    static NTSTATUS ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO MemoryDeviceInfo, _In_ PEGIDA_CONTEXT Context);
+    // --- Индивидуальные обработчики таблиц с обновлёнными сигнатурами ---
 
-    // Utility functions
+    static NTSTATUS ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS ProcessSystemInfo(_In_ PSMBIOS_SYSTEM_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS ProcessProcessorInfo(_In_ PSMBIOS_PROCESSOR_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context);
+
+    // --- Вспомогательные функции ---
+
     static NTSTATUS ChangeBootEnvironmentInfo(_In_ PEGIDA_CONTEXT Context);
 
-    // Module state
+    // --- Состояние модуля (статические переменные) ---
+
     static PVOID s_NtoskrnlBase;
     static PPHYSICAL_ADDRESS s_SmbiosPhysicalAddress;
     static PULONG s_SmbiosTableLength;

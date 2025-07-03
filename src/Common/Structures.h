@@ -2,50 +2,96 @@
 #include "Definitions.h"
 #include <ntimage.h>
 
-// IOCTL Codes - Compatible with user mode app
-#define IOCTL_EGIDA_START_SPOOF        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_EGIDA_STOP_SPOOF         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_EGIDA_GET_STATUS         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_EGIDA_SET_CONFIG         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_EGIDA_START_GPU_SPOOF    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_EGIDA_STOP_GPU_SPOOF     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_EGIDA_GET_GPU_STATUS     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_EGIDA_SET_PROFILE_DATA   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
-
-// Spoof flags - Compatible with user mode app
-#define EGIDA_SPOOF_SMBIOS         0x00000001
-#define EGIDA_SPOOF_DISK           0x00000002
-#define EGIDA_SPOOF_NETWORK        0x00000004
-#define EGIDA_SPOOF_GPU            0x00000008
-#define EGIDA_SPOOF_ALL            0xFFFFFFFF
-
-// SMBIOS Type definitions
-#define SMBIOS_TYPE_BIOS           0
-#define SMBIOS_TYPE_SYSTEM         1
-#define SMBIOS_TYPE_BASEBOARD      2
-#define SMBIOS_TYPE_CHASSIS        3
-#define SMBIOS_TYPE_PROCESSOR      4
-#define SMBIOS_TYPE_MEMORY_ARRAY   16
-#define SMBIOS_TYPE_MEMORY_DEVICE  17
-#define SMBIOS_TYPE_END            127
-
-#ifndef ARRAYSIZE
-#define ARRAYSIZE(a) (sizeof(a)/sizeof(a[0]))
-#endif
-
 // Forward declarations
 typedef struct _EGIDA_CONTEXT EGIDA_CONTEXT, * PEGIDA_CONTEXT;
-typedef struct _SPOOF_CONFIGURATION SPOOF_CONFIGURATION, * PSPOOF_CONFIGURATION;
-typedef struct _GPU_SPOOF_CONTEXT GPU_SPOOF_CONTEXT, * PGPU_SPOOF_CONTEXT;
+
+// Profile data structures for receiving from UserMode
+#pragma pack(push, 1)
+typedef struct _SMBIOS_PROFILE_DATA {
+    // BIOS Information (Type 0)
+    CHAR BiosVendor[EGIDA_MAX_STRING_LENGTH];
+    CHAR BiosVersion[EGIDA_MAX_STRING_LENGTH];
+    CHAR BiosReleaseDate[EGIDA_MAX_STRING_LENGTH];
+
+    // System Information (Type 1)
+    CHAR SystemManufacturer[EGIDA_MAX_STRING_LENGTH];
+    CHAR SystemProductName[EGIDA_MAX_STRING_LENGTH];
+    CHAR SystemVersion[EGIDA_MAX_STRING_LENGTH];
+    CHAR SystemSerialNumber[EGIDA_MAX_SERIAL_LENGTH];
+    CHAR SystemSKUNumber[EGIDA_MAX_STRING_LENGTH];
+    CHAR SystemFamily[EGIDA_MAX_STRING_LENGTH];
+    UINT8 SystemUUID[16];
+
+    // Baseboard Information (Type 2)
+    CHAR BaseboardManufacturer[EGIDA_MAX_STRING_LENGTH];
+    CHAR BaseboardProduct[EGIDA_MAX_STRING_LENGTH];
+    CHAR BaseboardVersion[EGIDA_MAX_STRING_LENGTH];
+    CHAR BaseboardSerialNumber[EGIDA_MAX_SERIAL_LENGTH];
+    CHAR BaseboardAssetTag[EGIDA_MAX_STRING_LENGTH];
+    CHAR BaseboardLocationInChassis[EGIDA_MAX_STRING_LENGTH];
+
+    // Chassis Information (Type 3)
+    CHAR ChassisManufacturer[EGIDA_MAX_STRING_LENGTH];
+    CHAR ChassisVersion[EGIDA_MAX_STRING_LENGTH];
+    CHAR ChassisSerialNumber[EGIDA_MAX_SERIAL_LENGTH];
+    CHAR ChassisAssetTag[EGIDA_MAX_STRING_LENGTH];
+
+    // Processor Information (Type 4)
+    CHAR ProcessorSocketDesignation[EGIDA_MAX_STRING_LENGTH];
+    CHAR ProcessorManufacturer[EGIDA_MAX_STRING_LENGTH];
+    CHAR ProcessorVersion[EGIDA_MAX_STRING_LENGTH];
+    CHAR ProcessorSerialNumber[EGIDA_MAX_SERIAL_LENGTH];
+    CHAR ProcessorAssetTag[EGIDA_MAX_STRING_LENGTH];
+    CHAR ProcessorPartNumber[EGIDA_MAX_STRING_LENGTH];
+    UINT64 ProcessorID;
+
+    // Memory Device Information (Type 17)
+    CHAR MemoryDeviceLocator[EGIDA_MAX_STRING_LENGTH];
+    CHAR MemoryBankLocator[EGIDA_MAX_STRING_LENGTH];
+    CHAR MemoryManufacturer[EGIDA_MAX_STRING_LENGTH];
+    CHAR MemorySerialNumber[EGIDA_MAX_SERIAL_LENGTH];
+    CHAR MemoryAssetTag[EGIDA_MAX_STRING_LENGTH];
+    CHAR MemoryPartNumber[EGIDA_MAX_STRING_LENGTH];
+    CHAR MemoryFirmwareVersion[EGIDA_MAX_STRING_LENGTH];
+    UINT16 MemoryModuleManufacturerID;
+    UINT16 MemoryModuleProductID;
+    UINT16 MemorySubsystemControllerManufacturerID;
+    UINT16 MemorySubsystemControllerProductID;
+    UINT16 MemoryPmic0ManufacturerID;
+    UINT16 MemoryPmic0RevisionNumber;
+    UINT16 MemoryRcdManufacturerID;
+    UINT16 MemoryRcdRevisionNumber;
+
+    // Boot Environment
+    UINT8 BootIdentifier[16];  // GUID as bytes
+
+    // Disk Serial
+    CHAR DiskSerials[10][EGIDA_MAX_SERIAL_LENGTH]; // Support up to 10 disks
+    UINT32 DiskCount;
+
+    // Network MAC addresses
+    UINT8 NetworkMACs[10][6]; // Support up to 10 network adapters
+    UINT32 NetworkAdapterCount;
+
+    // Padding for alignment
+    UINT8 Reserved[4];
+} SMBIOS_PROFILE_DATA, * PSMBIOS_PROFILE_DATA;
+#pragma pack(pop)
+
+// IOCTL codes for communication
+#define EGIDA_IOCTL_BASE 0x800
+#define IOCTL_EGIDA_SET_PROFILE CTL_CODE(FILE_DEVICE_UNKNOWN, EGIDA_IOCTL_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_EGIDA_EXECUTE_SPOOF CTL_CODE(FILE_DEVICE_UNKNOWN, EGIDA_IOCTL_BASE + 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_EGIDA_STOP_SPOOF CTL_CODE(FILE_DEVICE_UNKNOWN, EGIDA_IOCTL_BASE + 3, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // SMBIOS Structures
-typedef UINT8 SMBIOS_STRING;
-
 typedef struct _SMBIOS_HEADER {
     UINT8 Type;
     UINT8 Length;
     UINT16 Handle;
 } SMBIOS_HEADER, * PSMBIOS_HEADER;
+
+typedef UINT8 SMBIOS_STRING;
 
 // BIOS Information (Type 0)
 typedef struct _SMBIOS_BIOS_INFO {
@@ -168,123 +214,36 @@ typedef union _MEMORY_DEVICE_OPERATING_MODE_CAPABILITY {
 // Memory Array Information (Type 16)
 typedef struct _SMBIOS_MEMORY_ARRAY_INFO {
     SMBIOS_HEADER Header;
-    UINT8 Location;
-    UINT8 Use;
-    UINT8 MemoryErrorCorrection;
-    UINT32 MaximumCapacity;
-    UINT16 MemoryErrorInformationHandle;
-    UINT16 NumberOfMemoryDevices;
-    UINT64 ExtendedMaximumCapacity;
+    UINT8 Location;                             // Memory array location
+    UINT8 Use;                                  // Memory array use
+    UINT8 MemoryErrorCorrection;                // Memory error correction
+    UINT32 MaximumCapacity;                     // Maximum capacity in KB
+    UINT16 MemoryErrorInformationHandle;        // Memory error information handle
+    UINT16 NumberOfMemoryDevices;               // Number of memory devices
+    UINT64 ExtendedMaximumCapacity;             // Extended maximum capacity in bytes (SMBIOS 2.7+)
 } SMBIOS_MEMORY_ARRAY_INFO, * PSMBIOS_MEMORY_ARRAY_INFO;
 
 // Memory Device Information (Type 17)
-typedef struct _SMBIOS_MEMORY_DEVICE_INFO {
-    SMBIOS_HEADER Header;
-    UINT16 MemoryArrayHandle;
-    UINT16 MemoryErrorInformationHandle;
-    UINT16 TotalWidth;
-    UINT16 DataWidth;
-    UINT16 Size;
-    UINT8 FormFactor;
-    UINT8 DeviceSet;
-    SMBIOS_STRING DeviceLocator;
-    SMBIOS_STRING BankLocator;
-    UINT8 MemoryType;
-    MEMORY_DEVICE_TYPE_DETAIL TypeDetail;
-    UINT16 Speed;
-    SMBIOS_STRING Manufacturer;
-    SMBIOS_STRING SerialNumber;
-    SMBIOS_STRING AssetTag;
-    SMBIOS_STRING PartNumber;
-    UINT8 Attributes;
-    UINT32 ExtendedSize;
-    UINT16 ConfiguredMemoryClockSpeed;
-    UINT16 MinimumVoltage;
-    UINT16 MaximumVoltage;
-    UINT16 ConfiguredVoltage;
-    UINT8 MemoryTechnology;
-    MEMORY_DEVICE_OPERATING_MODE_CAPABILITY MemoryOperatingModeCapability;
-    SMBIOS_STRING FirmwareVersion;
-    UINT16 ModuleManufacturerID;
-    UINT16 ModuleProductID;
-    UINT16 MemorySubsystemControllerManufacturerID;
-    UINT16 MemorySubsystemControllerProductID;
-    UINT64 NonVolatileSize;
-    UINT64 VolatileSize;
-    UINT64 CacheSize;
-    UINT64 LogicalSize;
-    UINT32 ExtendedSpeed;
-    UINT32 ExtendedConfiguredMemorySpeed;
-    UINT16 Pmic0ManufacturerID;
-    UINT16 Pmic0RevisionNumber;
-    UINT16 RcdManufacturerID;
-    UINT16 RcdRevisionNumber;
+typedef struct _SMBIOS_MEMORY_DEVICE_INFO 
+{
+	SMBIOS_HEADER Header;
+    USHORT	MemArrayHandle;
+    USHORT	MemErrorInfoHandle;
+    USHORT	TotalWidth;
+    USHORT	DataWidth;
+    USHORT	Size;
+    SMBIOS_STRING	FormFactor;
+    SMBIOS_STRING	DeviceSet;
+    SMBIOS_STRING	DeviceLocator;
+    SMBIOS_STRING	BankLocator;
+    SMBIOS_STRING	MemoryType;
+    USHORT	TypeDetail;
+    USHORT	Speed;
+    SMBIOS_STRING   Manufacturer;
+    SMBIOS_STRING   SerialNumber;
+    SMBIOS_STRING   AssetTagNumber;
+    SMBIOS_STRING   PartNumber;
 } SMBIOS_MEMORY_DEVICE_INFO, * PSMBIOS_MEMORY_DEVICE_INFO;
-
-// Memory tracking structures
-typedef struct _SMBIOS_ALLOCATED_STRING {
-    PCHAR StringPointer;
-    SIZE_T StringSize;
-    PSMBIOS_HEADER OwnerHeader;
-    SMBIOS_STRING StringNumber;
-} SMBIOS_ALLOCATED_STRING, * PSMBIOS_ALLOCATED_STRING;
-
-// Disk spoofer specific structures
-typedef struct _TELEMETRY_UNIT_EXTENSION {
-    INT32 Flags;
-} TELEMETRY_UNIT_EXTENSION, * PTELEMETRY_UNIT_EXTENSION;
-
-typedef struct _STOR_SCSI_IDENTITY {
-    CHAR Space[0x8];
-    STRING SerialNumber;
-} STOR_SCSI_IDENTITY, * PSTOR_SCSI_IDENTITY;
-
-typedef struct _RAID_UNIT_EXTENSION {
-    union {
-        struct {
-            CHAR Padding[0x68];
-            STOR_SCSI_IDENTITY Identity;
-        } _Identity;
-
-        struct {
-            CHAR Padding[0x7c8];
-            TELEMETRY_UNIT_EXTENSION TelemetryExtension;
-        } _Smart;
-    };
-} RAID_UNIT_EXTENSION, * PRAID_UNIT_EXTENSION;
-
-typedef __int64(__fastcall* RaidUnitRegisterInterfaces)(PRAID_UNIT_EXTENSION Extension);
-typedef NTSTATUS(__fastcall* DiskEnableDisableFailurePrediction)(PVOID Extension, BOOLEAN Enable);
-
-typedef struct _DISK_ALLOCATED_STRING {
-    PCHAR StringPointer;
-    SIZE_T StringSize;
-    PRAID_UNIT_EXTENSION OwnerExtension;
-    ULONG StringType; // 0=Serial, 1=Model, 2=Vendor
-} DISK_ALLOCATED_STRING, * PDISK_ALLOCATED_STRING;
-
-// Disk string type constants
-#define DISK_STRING_SERIAL  0
-#define DISK_STRING_MODEL   1
-#define DISK_STRING_VENDOR  2
-
-// Network structures
-typedef struct _NETWORK_ADAPTER_INFO {
-    CHAR AdapterName[EGIDA_MAX_STRING_LENGTH];
-    UINT8 OriginalMAC[EGIDA_MAX_MAC_LENGTH];
-    UINT8 SpoofedMAC[EGIDA_MAX_MAC_LENGTH];
-    PDEVICE_OBJECT DeviceObject;
-    PDRIVER_OBJECT DriverObject;
-    BOOLEAN IsActive;
-} NETWORK_ADAPTER_INFO, * PNETWORK_ADAPTER_INFO;
-
-typedef struct _DISK_INFO {
-    CHAR SerialNumber[EGIDA_MAX_SERIAL_LENGTH];
-    CHAR Model[EGIDA_MAX_STRING_LENGTH];
-    CHAR Vendor[EGIDA_MAX_STRING_LENGTH];
-    PDEVICE_OBJECT DeviceObject;
-    BOOLEAN IsModified;
-} DISK_INFO, * PDISK_INFO;
 
 // Boot Environment Information
 typedef struct _BOOT_ENVIRONMENT_INFORMATION {
@@ -293,155 +252,26 @@ typedef struct _BOOT_ENVIRONMENT_INFORMATION {
     UINT64 BootFlags;
 } BOOT_ENVIRONMENT_INFORMATION, * PBOOT_ENVIRONMENT_INFORMATION;
 
-// GPU structures
-typedef struct _GPU_DEVICE_INFO {
-    CHAR OriginalDescription[EGIDA_MAX_STRING_LENGTH];
-    CHAR SpoofedDescription[EGIDA_MAX_STRING_LENGTH];
-    CHAR OriginalPNPDeviceID[EGIDA_MAX_STRING_LENGTH];
-    CHAR SpoofedPNPDeviceID[EGIDA_MAX_STRING_LENGTH];
-    PDEVICE_OBJECT DeviceObject;
-    PDRIVER_OBJECT DriverObject;
-    PVOID RegistryPath;
-    BOOLEAN IsModified;
-} GPU_DEVICE_INFO, * PGPU_DEVICE_INFO;
-
-typedef struct _GPU_REGISTRY_VALUE {
-    PWSTR ValueName;
-    PVOID OriginalData;
-    PVOID SpoofedData;
-    ULONG DataSize;
-    ULONG ValueType;
-    BOOLEAN IsAllocated;
-} GPU_REGISTRY_VALUE, * PGPU_REGISTRY_VALUE;
-
-typedef struct _GPU_SPOOF_CONTEXT {
-    PGPU_DEVICE_INFO DeviceList;
-    ULONG DeviceCount;
-    PGPU_REGISTRY_VALUE AllocatedValues;
-    ULONG AllocatedValueCount;
-    BOOLEAN IsActive;
-} GPU_SPOOF_CONTEXT, * PGPU_SPOOF_CONTEXT;
-
-// Configuration structures
-typedef struct _RANDOMIZE_CONFIG {
-    BOOLEAN RandomizeStrings;
-    BOOLEAN RandomizeSerials;
-    BOOLEAN RandomizeMAC;
-    BOOLEAN RandomizeUUID;
-    UINT32 MinStringLength;
-    UINT32 MaxStringLength;
-    UINT32 RandomSeed;
-} RANDOMIZE_CONFIG, * PRANDOMIZE_CONFIG;
-
-typedef struct _SPOOF_CONFIGURATION {
-    UINT32 Flags;
-    RANDOMIZE_CONFIG RandomConfig;
-    BOOLEAN EnableSmbiosSpoof;
-    BOOLEAN EnableDiskSpoof;
-    BOOLEAN EnableNetworkSpoof;
-    BOOLEAN EnableBootInfoSpoof;
-} SPOOF_CONFIGURATION, * PSPOOF_CONFIGURATION;
-
-typedef struct _PROFILE_DATA {
-    CHAR ProfileName[64];
-    UINT32 RandomSeed;
-    CHAR ProcessorId[64];
-
-    // SMBIOS specific values
-    CHAR MotherboardSerial[64];
-    CHAR SystemManufacturer[256];
-    CHAR SystemProductName[256];
-    CHAR SystemVersion[256];
-    CHAR SystemSerialNumber[64];
-    CHAR SystemSKU[256];
-    CHAR SystemFamily[256];
-    UINT8 SystemUUID[16];
-
-    CHAR BaseboardManufacturer[256];
-    CHAR BaseboardProduct[256];
-    CHAR BaseboardVersion[256];
-    CHAR BaseboardSerial[64];
-
-    CHAR ChassisManufacturer[256];
-    CHAR ChassisVersion[256];
-    CHAR ChassisSerial[64];
-
-    // Memory specific values (NEW)
-    CHAR MemoryManufacturer[256];
-    CHAR MemorySerial[64];
-    CHAR MemoryPartNumber[64];
-    CHAR MemoryAssetTag[64];
-    CHAR MemoryDeviceLocator[64];
-    CHAR MemoryBankLocator[64];
-
-    // Disk specific values
-    CHAR DiskSerial[64];
-    CHAR DiskModel[256];
-    CHAR DiskVendor[256];
-
-    // Network specific values
-    UINT8 MacAddress[6];
-
-    // GPU specific values
-    CHAR GpuDescription[256];
-    CHAR GpuPNPID[256];
-
-    // BIOS specific values
-    CHAR BiosVendor[256];
-    CHAR BiosVersion[256];
-    CHAR BiosReleaseDate[32];
-
-    // Validation
-    BOOLEAN IsValid;
-    UINT32 Checksum;
-} PROFILE_DATA, * PPROFILE_DATA;
-
-typedef struct _SPOOF_CONFIGURATION_EX {
-    SPOOF_CONFIGURATION BaseConfig;
-    PROFILE_DATA ProfileData;
-    BOOLEAN UseProfileData; // If TRUE, use ProfileData instead of random generation
-} SPOOF_CONFIGURATION_EX, * PSPOOF_CONFIGURATION_EX;
-
 // Main Egida Context
 typedef struct _EGIDA_CONTEXT {
-    PDEVICE_OBJECT DeviceObject;
-    UNICODE_STRING DeviceName;
-    UNICODE_STRING SymbolicLink;
-    SPOOF_CONFIGURATION Config;
-
     // Module specific data
     PVOID SmbiosTableBase;
     ULONG SmbiosTableSize;
     PPHYSICAL_ADDRESS SmbiosPhysicalAddress;
 
-    // Network adapters list
-    PNETWORK_ADAPTER_INFO NetworkAdapters;
-    ULONG NetworkAdapterCount;
-
-    // Disk information
-    PDISK_INFO DiskInfo;
-    ULONG DiskCount;
-
     // Boot information
     PBOOT_ENVIRONMENT_INFORMATION BootInfo;
 
-    // GPU information
-    PGPU_SPOOF_CONTEXT GpuContext;
-
-    // Memory tracking for allocated strings
-    PSMBIOS_ALLOCATED_STRING SmbiosAllocatedStrings;
-    ULONG SmbiosAllocatedStringCount;
-
-    PDISK_ALLOCATED_STRING DiskAllocatedStrings;
-    ULONG DiskAllocatedStringCount;
-
-    // Profile data
-    PROFILE_DATA CurrentProfile;
-    BOOLEAN HasProfileData;
+    // Profile data from UserMode
+    PSMBIOS_PROFILE_DATA ProfileData;
 
     // Status flags
     BOOLEAN IsInitialized;
     BOOLEAN IsSpoofingActive;
+    BOOLEAN HasProfile;
+
+    // Device object for communication
+    PDEVICE_OBJECT DeviceObject;
 
     // Synchronization
     KSPIN_LOCK SpinLock;
@@ -449,19 +279,11 @@ typedef struct _EGIDA_CONTEXT {
 
 } EGIDA_CONTEXT, * PEGIDA_CONTEXT;
 
-// Status Structure for IOCTL
-typedef struct _EGIDA_STATUS {
-    BOOLEAN IsActive;
-    UINT32 SpoofedComponents;
-    UINT32 LastError;
-    CHAR Version[32];
-    UINT32 AllocatedStringsCount;
-    UINT32 SmbiosAllocatedCount;
-    UINT32 DiskAllocatedCount;
-    UINT32 GpuDevicesCount;
-} EGIDA_STATUS, * PEGIDA_STATUS;
 
-// System information structures
+// ------------------------------------------------
+// ntoskrnl.exe
+// ------------------------------------------------
+
 typedef enum _SYSTEM_INFORMATION_CLASS
 {
     SystemInformationClassMin = 0,
@@ -577,7 +399,7 @@ extern "C"
         _In_           PCWSTR Path,
         _In_           PCWSTR ValueName,
         _In_           ULONG  ValueType,
-        _In_           PVOID  ValueData,
+        _In_		   PVOID  ValueData,
         _In_           ULONG  ValueLength
     );
 }

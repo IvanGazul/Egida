@@ -1,8 +1,6 @@
 #include "SmbiosSpoofer.h"
 #include "../Utils/EgidaUtils.h"
-#include "../Utils/Randomizer.h"
 #include "../Core/Logger.h"
-#include "../Common/Globals.h"
 
 // Static members
 PVOID SmbiosSpoofer::s_NtoskrnlBase = nullptr;
@@ -86,26 +84,41 @@ NTSTATUS SmbiosSpoofer::Initialize(_In_ PEGIDA_CONTEXT Context) {
     return EGIDA_SUCCESS;
 }
 
-VOID SmbiosSpoofer::SetStringFromProfile(_In_ PCHAR Buffer, _In_ PCSTR ProfileValue, _In_ UINT32 MaxLength) {
-    if (!Buffer || !ProfileValue) return;
-
-    SIZE_T profileLen = strlen(ProfileValue);
-    SIZE_T maxLen = MaxLength > 0 ? MaxLength : strlen(Buffer);
-    SIZE_T copyLen = min(profileLen, maxLen);
-
-    // Direct character-by-character modification
-    for (SIZE_T i = 0; i < copyLen; i++) {
-        Buffer[i] = ProfileValue[i];
+static UCHAR AppendString(PUCHAR stringSectionStart, PUCHAR* currentStringEnd, PCSTR stringToWrite, PUCHAR bufferEnd) {
+    
+    if (!stringToWrite || *stringToWrite == '\0') {
+        EgidaLogDebug("AppendString returning 0 - empty string");
+        return 0;
     }
 
-    // Null terminate if we have space
-    if (copyLen < maxLen) {
-        Buffer[copyLen] = '\0';
+    PUCHAR scanner = stringSectionStart;
+    UCHAR stringNumber = 1;
+
+    // First, check if the string already exists to avoid duplicates
+    while (scanner < *currentStringEnd) {
+        if (strcmp((PCSTR)scanner, stringToWrite) == 0) {
+            return stringNumber;
+        }
+        scanner += strlen((PCSTR)scanner) + 1;
+        stringNumber++;
     }
+
+    // String not found, append it if there's space
+    SIZE_T newStringLen = strlen(stringToWrite) + 1;
+    if (*currentStringEnd + newStringLen > bufferEnd) {
+        EgidaLogWarning("Not enough space in buffer to add new string: %s (need %zu bytes)", stringToWrite, newStringLen);
+        return 0;
+    }
+
+    RtlCopyMemory(*currentStringEnd, stringToWrite, newStringLen);
+    *currentStringEnd += newStringLen;
+
+    return stringNumber;
 }
 
+
 NTSTATUS SmbiosSpoofer::ChangeBootEnvironmentInfo(_In_ PEGIDA_CONTEXT Context) {
-    if (!Context || !s_BootEnvironmentInfo) {
+    if (!Context || !s_BootEnvironmentInfo || !Context->ProfileData) {
         return EGIDA_FAILED;
     }
 
@@ -120,14 +133,8 @@ NTSTATUS SmbiosSpoofer::ChangeBootEnvironmentInfo(_In_ PEGIDA_CONTEXT Context) {
             originalGuid.Data4[0], originalGuid.Data4[1], originalGuid.Data4[2], originalGuid.Data4[3],
             originalGuid.Data4[4], originalGuid.Data4[5], originalGuid.Data4[6], originalGuid.Data4[7]);
 
-        // Copy UUID from profile
-        if (Context->HasProfileData) {
-            RtlCopyMemory(&s_BootEnvironmentInfo->BootIdentifier, Context->CurrentProfile.SystemUUID, 16);
-        }
-        else {
-            // Fallback to random if no profile
-            EgidaRandomizer::GenerateRandomUUID(&s_BootEnvironmentInfo->BootIdentifier);
-        }
+        // Set new GUID from profile (convert from byte array to GUID structure)
+        RtlCopyMemory(&s_BootEnvironmentInfo->BootIdentifier, Context->ProfileData->BootIdentifier, sizeof(GUID));
 
         EgidaLogDebug("New Boot GUID: {%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}",
             s_BootEnvironmentInfo->BootIdentifier.Data1, s_BootEnvironmentInfo->BootIdentifier.Data2,
@@ -184,38 +191,55 @@ NTSTATUS SmbiosSpoofer::ExecuteSpoof(_In_ PEGIDA_CONTEXT Context) {
         return EGIDA_FAILED;
     }
 
-    if (!Context->HasProfileData) {
-        EgidaLogError("No profile data available for SMBIOS spoofing");
+    if (!Context->ProfileData) {
+        EgidaLogError("No profile data available");
         return EGIDA_FAILED;
     }
 
-    EgidaLogInfo("Executing SMBIOS spoofing with profile data...");
+    EgidaLogInfo("Executing SMBIOS spoofing...");
 
-    // Map SMBIOS tables
-    PVOID mappedBase = MmMapIoSpace(
-        *s_SmbiosPhysicalAddress,
-        *s_SmbiosTableLength,
-        MmNonCached
-    );
-
+    // Map the original SMBIOS table
+    PVOID mappedBase = MmMapIoSpace(*s_SmbiosPhysicalAddress, *s_SmbiosTableLength, MmNonCached);
     if (!mappedBase) {
         EgidaLogError("Failed to map SMBIOS tables");
         return EGIDA_FAILED;
     }
-
     Context->SmbiosTableBase = mappedBase;
 
+    // Allocate a temporary buffer for the new table. Add some padding for safety.
+    ULONG newTableBufferSize = *s_SmbiosTableLength + PAGE_SIZE;
+    PVOID newTableBuffer = ExAllocatePoolWithTag(NonPagedPool, newTableBufferSize, 'SMBP');
+    if (!newTableBuffer) {
+        EgidaLogError("Failed to allocate buffer for new SMBIOS table");
+        MmUnmapIoSpace(mappedBase, *s_SmbiosTableLength);
+        return EGIDA_FAILED;
+    }
+    RtlZeroMemory(newTableBuffer, newTableBufferSize);
+
+    NTSTATUS status = EGIDA_SUCCESS;
+    ULONG finalTableSize = 0;
+
     __try {
-        // Process all SMBIOS tables
-        NTSTATUS status = LoopSmbiosTables(mappedBase, *s_SmbiosTableLength, Context);
+        // Rebuild the entire SMBIOS table in our new buffer
+        status = LoopAndRebuildSmbiosTables(mappedBase, *s_SmbiosTableLength, newTableBuffer, newTableBufferSize, &finalTableSize, Context);
         if (!NT_SUCCESS(status)) {
-            EgidaLogError("Failed to process SMBIOS tables: 0x%08X", status);
-            MmUnmapIoSpace(mappedBase, *s_SmbiosTableLength);
-            return status;
+            EgidaLogError("Failed to process and rebuild SMBIOS tables: 0x%08X", status);
+            __leave;
         }
 
+        // Check if the new table fits into the original space
+        if (finalTableSize > *s_SmbiosTableLength) {
+            EgidaLogError("FATAL: Rebuilt SMBIOS table size (%lu) exceeds original size (%lu). Cannot spoof.", finalTableSize, *s_SmbiosTableLength);
+            status = EGIDA_FAILED;
+            __leave;
+        }
+
+        // Copy the new table over the original one
+        RtlCopyMemory(mappedBase, newTableBuffer, finalTableSize);
+        EgidaLogInfo("Successfully copied spoofed SMBIOS table. New size: %lu", finalTableSize);
+
         // Change boot environment info if available
-        if (Context->Config.EnableBootInfoSpoof && s_BootEnvironmentInfo) {
+        if (s_BootEnvironmentInfo) {
             ChangeBootEnvironmentInfo(Context);
         }
 
@@ -224,635 +248,294 @@ NTSTATUS SmbiosSpoofer::ExecuteSpoof(_In_ PEGIDA_CONTEXT Context) {
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         EgidaLogError("Exception during SMBIOS spoofing");
-        MmUnmapIoSpace(mappedBase, *s_SmbiosTableLength);
-        return EGIDA_FAILED;
+        status = EGIDA_FAILED;
     }
 
-    // Keep mapping for potential restoration
-    return EGIDA_SUCCESS;
+    // Cleanup
+    ExFreePoolWithTag(newTableBuffer, 'SMBP');
+
+    // Unmap the region on failure; on success, keep it mapped for potential restoration.
+    if (!NT_SUCCESS(status)) {
+        MmUnmapIoSpace(mappedBase, *s_SmbiosTableLength);
+        Context->SmbiosTableBase = nullptr;
+    }
+
+    return status;
 }
 
-NTSTATUS SmbiosSpoofer::LoopSmbiosTables(_In_ PVOID MappedBase, _In_ ULONG TableSize, _In_ PEGIDA_CONTEXT Context) {
-    PUCHAR endAddress = static_cast<PUCHAR>(MappedBase) + TableSize;
-    PUCHAR currentPos = static_cast<PUCHAR>(MappedBase);
+NTSTATUS SmbiosSpoofer::ProcessAndRebuildTable(_In_ PSMBIOS_HEADER ReadHeader, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
+    switch (ReadHeader->Type) {
+    case SMBIOS_TYPE_BIOS:
+        return ProcessBiosInfo(reinterpret_cast<PSMBIOS_BIOS_INFO>(ReadHeader), WritePtr, BufferEnd, Context);
+    case SMBIOS_TYPE_SYSTEM:
+        return ProcessSystemInfo(reinterpret_cast<PSMBIOS_SYSTEM_INFO>(ReadHeader), WritePtr, BufferEnd, Context);
+    case SMBIOS_TYPE_BASEBOARD:
+        return ProcessBaseboardInfo(reinterpret_cast<PSMBIOS_BASEBOARD_INFO>(ReadHeader), WritePtr, BufferEnd, Context);
+    case SMBIOS_TYPE_CHASSIS:
+        return ProcessChassisInfo(reinterpret_cast<PSMBIOS_CHASSIS_INFO>(ReadHeader), WritePtr, BufferEnd, Context);
+    case SMBIOS_TYPE_PROCESSOR:
+        return ProcessProcessorInfo(reinterpret_cast<PSMBIOS_PROCESSOR_INFO>(ReadHeader), WritePtr, BufferEnd, Context);
+    case SMBIOS_TYPE_MEMORY_DEVICE:
+        return ProcessMemoryDeviceInfo(reinterpret_cast<PSMBIOS_MEMORY_DEVICE_INFO>(ReadHeader), WritePtr, BufferEnd, Context);
+        // These types are processed by just copying, as they have no strings to spoof in this implementation
+    case SMBIOS_TYPE_MEMORY_ARRAY:
+    default:
+        // For unknown or unprocessed types, just copy them as-is
+    {
+        PUCHAR stringSection = (PUCHAR)ReadHeader + ReadHeader->Length;
+        PUCHAR endOfStringSection = stringSection;
+        while (endOfStringSection < (PUCHAR)ReadHeader + 4096 && (*endOfStringSection != 0 || *(endOfStringSection + 1) != 0)) {
+            endOfStringSection++;
+        }
+        endOfStringSection += 2; // Include the double null-terminator
 
-    while (currentPos < endAddress) {
-        PSMBIOS_HEADER header = reinterpret_cast<PSMBIOS_HEADER>(currentPos);
+        ULONG totalStructSize = (ULONG)(endOfStringSection - (PUCHAR)ReadHeader);
 
-        // Check for end of table
+        if (*WritePtr + totalStructSize > BufferEnd) {
+            EgidaLogError("Not enough space to copy structure type %d", ReadHeader->Type);
+            return EGIDA_FAILED;
+        }
+
+        RtlCopyMemory(*WritePtr, ReadHeader, totalStructSize);
+        *WritePtr += totalStructSize;
+    }
+    return EGIDA_SUCCESS;
+    }
+}
+
+NTSTATUS SmbiosSpoofer::LoopAndRebuildSmbiosTables(_In_ PVOID ReadBase, _In_ ULONG ReadSize, _In_ PVOID WriteBase, _In_ ULONG WriteSize, _Out_ PULONG FinalSize, _In_ PEGIDA_CONTEXT Context) {
+    PUCHAR readPtr = (PUCHAR)ReadBase;
+    PUCHAR readEnd = readPtr + ReadSize;
+    PUCHAR writePtr = (PUCHAR)WriteBase;
+    PUCHAR writeEnd = writePtr + WriteSize;
+
+    while (readPtr < readEnd) {
+        PSMBIOS_HEADER header = (PSMBIOS_HEADER)readPtr;
         if (header->Type == SMBIOS_TYPE_END && header->Length == 4) {
+            // End of tables found, copy the end marker and finish.
+            if (writePtr + 4 <= writeEnd) {
+                RtlCopyMemory(writePtr, header, 4);
+                writePtr += 4;
+            }
             break;
         }
 
-        // Process this table
-        NTSTATUS status = ProcessSmbiosTable(header, Context);
+        if (header->Length < sizeof(SMBIOS_HEADER)) {
+            EgidaLogError("Malformed SMBIOS table - invalid header length");
+            return EGIDA_FAILED;
+        }
+
+        NTSTATUS status = ProcessAndRebuildTable(header, &writePtr, writeEnd, Context);
         if (!NT_SUCCESS(status)) {
             EgidaLogWarning("Failed to process SMBIOS table type %d", header->Type);
+            // Even if one table fails, we try to continue. You might want to return EGIDA_FAILED here instead.
         }
 
-        // Move to next table
-        PUCHAR stringSection = currentPos + header->Length;
-
-        // Skip to end of strings (double null terminator)
-        while (*stringSection != 0 || *(stringSection + 1) != 0) {
+        // Move read pointer to the next structure
+        PUCHAR stringSection = readPtr + header->Length;
+        while (stringSection < readEnd - 1 && (*stringSection != 0 || *(stringSection + 1) != 0)) {
             stringSection++;
-            if (stringSection >= endAddress) {
-                EgidaLogError("Malformed SMBIOS table - string section overflow");
-                return EGIDA_FAILED;
-            }
         }
-
-        stringSection += 2; // Skip double null
-        currentPos = stringSection;
+        stringSection += 2; // Move past the double null-terminator
+        readPtr = stringSection;
     }
 
+    *FinalSize = (ULONG)(writePtr - (PUCHAR)WriteBase);
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS SmbiosSpoofer::ProcessSmbiosTable(_In_ PSMBIOS_HEADER Header, _In_ PEGIDA_CONTEXT Context) {
-    if (!Header || !Context) {
-        return EGIDA_FAILED;
-    }
 
-    switch (Header->Type) {
-    case SMBIOS_TYPE_BIOS:
-        EgidaLogDebug("Processing BIOS Information (Type 0)");
-        return ProcessBiosInfo(reinterpret_cast<PSMBIOS_BIOS_INFO>(Header), Context);
+#define GET_ORIGINAL_STRING(header, index) (index == 0 ? "" : EgidaUtils::GetSmbiosString(header, index))
+#define GET_SPOOFED_OR_ORIGINAL(profile_str, original_str) (strlen(profile_str) > 0 ? profile_str : original_str)
 
-    case SMBIOS_TYPE_SYSTEM:
-        EgidaLogDebug("Processing System Information (Type 1)");
-        return ProcessSystemInfo(reinterpret_cast<PSMBIOS_SYSTEM_INFO>(Header), Context);
+NTSTATUS SmbiosSpoofer::ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
+    EgidaLogDebug("Rebuilding BIOS Information (Type 0)");
+    if (*WritePtr + ReadInfo->Header.Length + 256 > BufferEnd) return EGIDA_FAILED; // Safety margin for strings
 
-    case SMBIOS_TYPE_BASEBOARD:
-        EgidaLogDebug("Processing Baseboard Information (Type 2)");
-        return ProcessBaseboardInfo(reinterpret_cast<PSMBIOS_BASEBOARD_INFO>(Header), Context);
+    PSMBIOS_BIOS_INFO writeInfo = (PSMBIOS_BIOS_INFO)*WritePtr;
+    RtlCopyMemory(writeInfo, ReadInfo, ReadInfo->Header.Length);
 
-    case SMBIOS_TYPE_CHASSIS:
-        EgidaLogDebug("Processing Chassis Information (Type 3)");
-        return ProcessChassisInfo(reinterpret_cast<PSMBIOS_CHASSIS_INFO>(Header), Context);
+    PUCHAR stringSectionStart = *WritePtr + ReadInfo->Header.Length;
+    PUCHAR stringSectionEnd = stringSectionStart;
 
-    case SMBIOS_TYPE_PROCESSOR:
-        EgidaLogDebug("Processing Processor Information (Type 4)");
-        return ProcessProcessorInfo(reinterpret_cast<PSMBIOS_PROCESSOR_INFO>(Header), Context);
+    PSMBIOS_PROFILE_DATA profile = Context->ProfileData;
 
-    case SMBIOS_TYPE_MEMORY_ARRAY:
-        EgidaLogDebug("Processing Memory Array Information (Type 16)");
-        return ProcessMemoryArrayInfo(reinterpret_cast<PSMBIOS_MEMORY_ARRAY_INFO>(Header), Context);
+    PCSTR vendor = GET_SPOOFED_OR_ORIGINAL(profile->BiosVendor, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Vendor));
+    PCSTR version = GET_SPOOFED_OR_ORIGINAL(profile->BiosVersion, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->BiosVersion));
+    PCSTR releaseDate = GET_SPOOFED_OR_ORIGINAL(profile->BiosReleaseDate, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->BiosReleaseDate));
 
-    case SMBIOS_TYPE_MEMORY_DEVICE:
-        EgidaLogDebug("Processing Memory Device Information (Type 17)");
-        return ProcessMemoryDeviceInfo(reinterpret_cast<PSMBIOS_MEMORY_DEVICE_INFO>(Header), Context);
-    }
+    writeInfo->Vendor = AppendString(stringSectionStart, &stringSectionEnd, vendor, BufferEnd);
+    writeInfo->BiosVersion = AppendString(stringSectionStart, &stringSectionEnd, version, BufferEnd);
+    writeInfo->BiosReleaseDate = AppendString(stringSectionStart, &stringSectionEnd, releaseDate, BufferEnd);
 
+    *stringSectionEnd++ = '\0'; // Final null terminator for the string section
+    *WritePtr = stringSectionEnd;
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS SmbiosSpoofer::ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO BiosInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!BiosInfo || !Context) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing BIOS Information (Type 0) with profile data");
+NTSTATUS SmbiosSpoofer::ProcessSystemInfo(_In_ PSMBIOS_SYSTEM_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
+    EgidaLogDebug("Rebuilding System Information (Type 1)");
+    if (*WritePtr + ReadInfo->Header.Length + 512 > BufferEnd) return EGIDA_FAILED; // Safety margin for strings
 
-    // Set BIOS vendor
-    PCHAR vendor = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->Vendor);
-    if (vendor) {
-        EgidaLogDebug("Original BIOS vendor: %s", vendor);
-        SetStringFromProfile(vendor, Context->CurrentProfile.BiosVendor, strlen(vendor));
-        EgidaLogDebug("New BIOS vendor: %s", vendor);
-    }
-    else if (strlen(Context->CurrentProfile.BiosVendor) > 0) {
-        // Allocate new string for null field
-        AllocateAndSetSmbiosString(&BiosInfo->Header, BiosInfo->Vendor, Context->CurrentProfile.BiosVendor, Context);
-        EgidaLogDebug("Allocated BIOS vendor: %s", Context->CurrentProfile.BiosVendor);
-    }
+    PSMBIOS_SYSTEM_INFO writeInfo = (PSMBIOS_SYSTEM_INFO)*WritePtr;
+    RtlCopyMemory(writeInfo, ReadInfo, ReadInfo->Header.Length);
 
-    // Set BIOS version
-    PCHAR biosVersion = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->BiosVersion);
-    if (biosVersion) {
-        EgidaLogDebug("Original BIOS version: %s", biosVersion);
-        SetStringFromProfile(biosVersion, Context->CurrentProfile.BiosVersion, strlen(biosVersion));
-        EgidaLogDebug("New BIOS version: %s", biosVersion);
-    }
-    else if (strlen(Context->CurrentProfile.BiosVersion) > 0) {
-        AllocateAndSetSmbiosString(&BiosInfo->Header, BiosInfo->BiosVersion, Context->CurrentProfile.BiosVersion, Context);
-        EgidaLogDebug("Allocated BIOS version: %s", Context->CurrentProfile.BiosVersion);
-    }
+    PUCHAR stringSectionStart = *WritePtr + ReadInfo->Header.Length;
+    PUCHAR stringSectionEnd = stringSectionStart;
 
-    // Set BIOS release date
-    PCHAR releaseDate = EgidaUtils::GetSmbiosString(&BiosInfo->Header, BiosInfo->BiosReleaseDate);
-    if (releaseDate) {
-        EgidaLogDebug("Original BIOS release date: %s", releaseDate);
-        SetStringFromProfile(releaseDate, Context->CurrentProfile.BiosReleaseDate, strlen(releaseDate));
-        EgidaLogDebug("New BIOS release date: %s", releaseDate);
-    }
-    else if (strlen(Context->CurrentProfile.BiosReleaseDate) > 0) {
-        AllocateAndSetSmbiosString(&BiosInfo->Header, BiosInfo->BiosReleaseDate, Context->CurrentProfile.BiosReleaseDate, Context);
-        EgidaLogDebug("Allocated BIOS release date: %s", Context->CurrentProfile.BiosReleaseDate);
-    }
+    PSMBIOS_PROFILE_DATA profile = Context->ProfileData;
 
+    PCSTR manufacturer = GET_SPOOFED_OR_ORIGINAL(profile->SystemManufacturer, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Manufacturer));
+    PCSTR productName = GET_SPOOFED_OR_ORIGINAL(profile->SystemProductName, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->ProductName));
+    PCSTR version = GET_SPOOFED_OR_ORIGINAL(profile->SystemVersion, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Version));
+    PCSTR serialNumber = GET_SPOOFED_OR_ORIGINAL(profile->SystemSerialNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->SerialNumber));
+    PCSTR skuNumber = GET_SPOOFED_OR_ORIGINAL(profile->SystemSKUNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->SKUNumber));
+    PCSTR family = GET_SPOOFED_OR_ORIGINAL(profile->SystemFamily, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Family));
+
+    writeInfo->Manufacturer = AppendString(stringSectionStart, &stringSectionEnd, manufacturer, BufferEnd);
+    writeInfo->ProductName = AppendString(stringSectionStart, &stringSectionEnd, productName, BufferEnd);
+    writeInfo->Version = AppendString(stringSectionStart, &stringSectionEnd, version, BufferEnd);
+    writeInfo->SerialNumber = AppendString(stringSectionStart, &stringSectionEnd, serialNumber, BufferEnd);
+    writeInfo->SKUNumber = AppendString(stringSectionStart, &stringSectionEnd, skuNumber, BufferEnd);
+    writeInfo->Family = AppendString(stringSectionStart, &stringSectionEnd, family, BufferEnd);
+
+    // Update UUID directly
+    RtlCopyMemory(writeInfo->UUID, profile->SystemUUID, 16);
+    EgidaLogDebug("Updated system UUID");
+
+    *stringSectionEnd++ = '\0';
+    *WritePtr = stringSectionEnd;
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS SmbiosSpoofer::ProcessSystemInfo(_In_ PSMBIOS_SYSTEM_INFO SystemInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!SystemInfo || !Context) {
-        EgidaLogError("Invalid parameters for ProcessSystemInfo");
-        return EGIDA_FAILED;
-    }
+NTSTATUS SmbiosSpoofer::ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
+    EgidaLogDebug("Rebuilding Baseboard Information (Type 2)");
+    if (*WritePtr + ReadInfo->Header.Length + 512 > BufferEnd) return EGIDA_FAILED;
 
-    EgidaLogInfo("=== PROCESSING SYSTEM INFORMATION (TYPE 1) ===");
+    PSMBIOS_BASEBOARD_INFO writeInfo = (PSMBIOS_BASEBOARD_INFO)*WritePtr;
+    RtlCopyMemory(writeInfo, ReadInfo, ReadInfo->Header.Length);
 
-    // Log original UUID first
-    EgidaLogDebug("Original System UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-        SystemInfo->UUID[0], SystemInfo->UUID[1], SystemInfo->UUID[2], SystemInfo->UUID[3],
-        SystemInfo->UUID[4], SystemInfo->UUID[5], SystemInfo->UUID[6], SystemInfo->UUID[7],
-        SystemInfo->UUID[8], SystemInfo->UUID[9], SystemInfo->UUID[10], SystemInfo->UUID[11],
-        SystemInfo->UUID[12], SystemInfo->UUID[13], SystemInfo->UUID[14], SystemInfo->UUID[15]);
+    PUCHAR stringSectionStart = *WritePtr + ReadInfo->Header.Length;
+    PUCHAR stringSectionEnd = stringSectionStart;
 
-    // Set manufacturer
-    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Manufacturer);
-    if (manufacturer) {
-        EgidaLogDebug("Original system manufacturer: %s", manufacturer);
-        SetStringFromProfile(manufacturer, Context->CurrentProfile.SystemManufacturer, strlen(manufacturer));
-        EgidaLogDebug("New system manufacturer: %s", manufacturer);
-    }
-    else if (strlen(Context->CurrentProfile.SystemManufacturer) > 0) {
-        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->Manufacturer, Context->CurrentProfile.SystemManufacturer, Context);
-        EgidaLogDebug("Allocated system manufacturer: %s", Context->CurrentProfile.SystemManufacturer);
-    }
+    PSMBIOS_PROFILE_DATA profile = Context->ProfileData;
 
-    // Set product name
-    PCHAR productName = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->ProductName);
-    if (productName) {
-        EgidaLogDebug("Original product name: %s", productName);
-        SetStringFromProfile(productName, Context->CurrentProfile.SystemProductName, strlen(productName));
-        EgidaLogDebug("New product name: %s", productName);
-    }
-    else if (strlen(Context->CurrentProfile.SystemProductName) > 0) {
-        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->ProductName, Context->CurrentProfile.SystemProductName, Context);
-        EgidaLogDebug("Allocated product name: %s", Context->CurrentProfile.SystemProductName);
-    }
+    PCSTR manufacturer = GET_SPOOFED_OR_ORIGINAL(profile->BaseboardManufacturer, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Manufacturer));
+    PCSTR product = GET_SPOOFED_OR_ORIGINAL(profile->BaseboardProduct, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Product));
+    PCSTR version = GET_SPOOFED_OR_ORIGINAL(profile->BaseboardVersion, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Version));
+    PCSTR serial = GET_SPOOFED_OR_ORIGINAL(profile->BaseboardSerialNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->SerialNumber));
+    PCSTR assetTag = GET_SPOOFED_OR_ORIGINAL(profile->BaseboardAssetTag, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->AssetTag));
+    PCSTR location = GET_SPOOFED_OR_ORIGINAL(profile->BaseboardLocationInChassis, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->LocationInChassis));
 
-    // Set version
-    PCHAR version = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Version);
-    if (version) {
-        EgidaLogDebug("Original system version: %s", version);
-        SetStringFromProfile(version, Context->CurrentProfile.SystemVersion, strlen(version));
-        EgidaLogDebug("New system version: %s", version);
-    }
-    else if (strlen(Context->CurrentProfile.SystemVersion) > 0) {
-        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->Version, Context->CurrentProfile.SystemVersion, Context);
-        EgidaLogDebug("Allocated system version: %s", Context->CurrentProfile.SystemVersion);
-    }
+    writeInfo->Manufacturer = AppendString(stringSectionStart, &stringSectionEnd, manufacturer, BufferEnd);
+    writeInfo->Product = AppendString(stringSectionStart, &stringSectionEnd, product, BufferEnd);
+    writeInfo->Version = AppendString(stringSectionStart, &stringSectionEnd, version, BufferEnd);
+    writeInfo->SerialNumber = AppendString(stringSectionStart, &stringSectionEnd, serial, BufferEnd);
+    writeInfo->AssetTag = AppendString(stringSectionStart, &stringSectionEnd, assetTag, BufferEnd);
+    writeInfo->LocationInChassis = AppendString(stringSectionStart, &stringSectionEnd, location, BufferEnd);
 
-    // Set serial number
-    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->SerialNumber);
-    if (serialNumber) {
-        EgidaLogDebug("Original system serial: %s", serialNumber);
-        SetStringFromProfile(serialNumber, Context->CurrentProfile.SystemSerialNumber, strlen(serialNumber));
-        EgidaLogDebug("New system serial: %s", serialNumber);
-    }
-    else if (strlen(Context->CurrentProfile.SystemSerialNumber) > 0) {
-        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->SerialNumber, Context->CurrentProfile.SystemSerialNumber, Context);
-        EgidaLogDebug("Allocated system serial: %s", Context->CurrentProfile.SystemSerialNumber);
-    }
-
-    // Set SKU number
-    PCHAR skuNumber = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->SKUNumber);
-    if (skuNumber) {
-        EgidaLogDebug("Original SKU number: %s", skuNumber);
-        SetStringFromProfile(skuNumber, Context->CurrentProfile.SystemSKU, strlen(skuNumber));
-        EgidaLogDebug("New SKU number: %s", skuNumber);
-    }
-    else if (strlen(Context->CurrentProfile.SystemSKU) > 0) {
-        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->SKUNumber, Context->CurrentProfile.SystemSKU, Context);
-        EgidaLogDebug("Allocated SKU number: %s", Context->CurrentProfile.SystemSKU);
-    }
-
-    // Set family
-    PCHAR family = EgidaUtils::GetSmbiosString(&SystemInfo->Header, SystemInfo->Family);
-    if (family) {
-        EgidaLogDebug("Original system family: %s", family);
-        SetStringFromProfile(family, Context->CurrentProfile.SystemFamily, strlen(family));
-        EgidaLogDebug("New system family: %s", family);
-    }
-    else if (strlen(Context->CurrentProfile.SystemFamily) > 0) {
-        AllocateAndSetSmbiosString(&SystemInfo->Header, SystemInfo->Family, Context->CurrentProfile.SystemFamily, Context);
-        EgidaLogDebug("Allocated system family: %s", Context->CurrentProfile.SystemFamily);
-    }
-
-    // === CRITICAL: Set UUID ===
-    EgidaLogInfo("=== SETTING SYSTEM UUID ===");
-
-    // Log profile UUID
-    EgidaLogDebug("Profile UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-        Context->CurrentProfile.SystemUUID[0], Context->CurrentProfile.SystemUUID[1],
-        Context->CurrentProfile.SystemUUID[2], Context->CurrentProfile.SystemUUID[3],
-        Context->CurrentProfile.SystemUUID[4], Context->CurrentProfile.SystemUUID[5],
-        Context->CurrentProfile.SystemUUID[6], Context->CurrentProfile.SystemUUID[7],
-        Context->CurrentProfile.SystemUUID[8], Context->CurrentProfile.SystemUUID[9],
-        Context->CurrentProfile.SystemUUID[10], Context->CurrentProfile.SystemUUID[11],
-        Context->CurrentProfile.SystemUUID[12], Context->CurrentProfile.SystemUUID[13],
-        Context->CurrentProfile.SystemUUID[14], Context->CurrentProfile.SystemUUID[15]);
-
-    // Check if profile UUID is valid (not all zeros)
-    BOOLEAN isValidUUID = FALSE;
-    for (int i = 0; i < 16; i++) {
-        if (Context->CurrentProfile.SystemUUID[i] != 0) {
-            isValidUUID = TRUE;
-            break;
-        }
-    }
-
-    if (isValidUUID) {
-        // Copy UUID from profile
-        RtlCopyMemory(SystemInfo->UUID, Context->CurrentProfile.SystemUUID, 16);
-        EgidaLogInfo("UUID set from profile successfully");
-    }
-    else {
-        EgidaLogWarning("Profile UUID is invalid (all zeros), generating random UUID");
-        EgidaRandomizer::GenerateRandomUUID(reinterpret_cast<GUID*>(SystemInfo->UUID));
-        EgidaLogInfo("Generated random UUID");
-    }
-
-    // Log final UUID
-    EgidaLogInfo("Final System UUID: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-        SystemInfo->UUID[0], SystemInfo->UUID[1], SystemInfo->UUID[2], SystemInfo->UUID[3],
-        SystemInfo->UUID[4], SystemInfo->UUID[5], SystemInfo->UUID[6], SystemInfo->UUID[7],
-        SystemInfo->UUID[8], SystemInfo->UUID[9], SystemInfo->UUID[10], SystemInfo->UUID[11],
-        SystemInfo->UUID[12], SystemInfo->UUID[13], SystemInfo->UUID[14], SystemInfo->UUID[15]);
-
-    EgidaLogInfo("=== SYSTEM INFORMATION PROCESSING COMPLETED ===");
+    *stringSectionEnd++ = '\0';
+    *WritePtr = stringSectionEnd;
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS SmbiosSpoofer::ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO BaseboardInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!BaseboardInfo || !Context) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing Baseboard Information (Type 2) with profile data");
+NTSTATUS SmbiosSpoofer::ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
+    EgidaLogDebug("Rebuilding Chassis Information (Type 3)");
+    if (*WritePtr + ReadInfo->Header.Length + 512 > BufferEnd) return EGIDA_FAILED;
 
-    // Set manufacturer
-    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Manufacturer);
-    if (manufacturer) {
-        EgidaLogDebug("Original baseboard manufacturer: %s", manufacturer);
-        SetStringFromProfile(manufacturer, Context->CurrentProfile.BaseboardManufacturer, strlen(manufacturer));
-        EgidaLogDebug("New baseboard manufacturer: %s", manufacturer);
-    }
-    else if (strlen(Context->CurrentProfile.BaseboardManufacturer) > 0) {
-        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Manufacturer, Context->CurrentProfile.BaseboardManufacturer, Context);
-        EgidaLogDebug("Allocated baseboard manufacturer: %s", Context->CurrentProfile.BaseboardManufacturer);
-    }
+    PSMBIOS_CHASSIS_INFO writeInfo = (PSMBIOS_CHASSIS_INFO)*WritePtr;
+    RtlCopyMemory(writeInfo, ReadInfo, ReadInfo->Header.Length);
 
-    // Set product
-    PCHAR product = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Product);
-    if (product) {
-        EgidaLogDebug("Original baseboard product: %s", product);
-        SetStringFromProfile(product, Context->CurrentProfile.BaseboardProduct, strlen(product));
-        EgidaLogDebug("New baseboard product: %s", product);
-    }
-    else if (strlen(Context->CurrentProfile.BaseboardProduct) > 0) {
-        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Product, Context->CurrentProfile.BaseboardProduct, Context);
-        EgidaLogDebug("Allocated baseboard product: %s", Context->CurrentProfile.BaseboardProduct);
-    }
+    PUCHAR stringSectionStart = *WritePtr + ReadInfo->Header.Length;
+    PUCHAR stringSectionEnd = stringSectionStart;
 
-    // Set version
-    PCHAR version = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Version);
-    if (version) {
-        EgidaLogDebug("Original baseboard version: %s", version);
-        SetStringFromProfile(version, Context->CurrentProfile.BaseboardVersion, strlen(version));
-        EgidaLogDebug("New baseboard version: %s", version);
-    }
-    else if (strlen(Context->CurrentProfile.BaseboardVersion) > 0) {
-        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->Version, Context->CurrentProfile.BaseboardVersion, Context);
-        EgidaLogDebug("Allocated baseboard version: %s", Context->CurrentProfile.BaseboardVersion);
-    }
+    PSMBIOS_PROFILE_DATA profile = Context->ProfileData;
 
-    // Set serial number
-    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->SerialNumber);
-    if (serialNumber) {
-        EgidaLogDebug("Original baseboard serial: %s", serialNumber);
-        SetStringFromProfile(serialNumber, Context->CurrentProfile.BaseboardSerial, strlen(serialNumber));
-        EgidaLogDebug("New baseboard serial: %s", serialNumber);
-    }
-    else if (strlen(Context->CurrentProfile.BaseboardSerial) > 0) {
-        AllocateAndSetSmbiosString(&BaseboardInfo->Header, BaseboardInfo->SerialNumber, Context->CurrentProfile.BaseboardSerial, Context);
-        EgidaLogDebug("Allocated baseboard serial: %s", Context->CurrentProfile.BaseboardSerial);
-    }
+    PCSTR manufacturer = GET_SPOOFED_OR_ORIGINAL(profile->ChassisManufacturer, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Manufacturer));
+    PCSTR version = GET_SPOOFED_OR_ORIGINAL(profile->ChassisVersion, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Version));
+    PCSTR serial = GET_SPOOFED_OR_ORIGINAL(profile->ChassisSerialNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->SerialNumber));
+    PCSTR assetTag = GET_SPOOFED_OR_ORIGINAL(profile->ChassisAssetTag, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->AssetTagNumber));
 
+    writeInfo->Manufacturer = AppendString(stringSectionStart, &stringSectionEnd, manufacturer, BufferEnd);
+    writeInfo->Version = AppendString(stringSectionStart, &stringSectionEnd, version, BufferEnd);
+    writeInfo->SerialNumber = AppendString(stringSectionStart, &stringSectionEnd, serial, BufferEnd);
+    writeInfo->AssetTagNumber = AppendString(stringSectionStart, &stringSectionEnd, assetTag, BufferEnd);
+
+    *stringSectionEnd++ = '\0';
+    *WritePtr = stringSectionEnd;
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS SmbiosSpoofer::ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ChassisInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!ChassisInfo || !Context) return EGIDA_FAILED;
+NTSTATUS SmbiosSpoofer::ProcessProcessorInfo(_In_ PSMBIOS_PROCESSOR_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
+    EgidaLogDebug("Rebuilding Processor Information (Type 4)");
+    if (*WritePtr + ReadInfo->Header.Length + 512 > BufferEnd) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing Chassis Information (Type 3) with profile data");
+    PSMBIOS_PROCESSOR_INFO writeInfo = (PSMBIOS_PROCESSOR_INFO)*WritePtr;
+    RtlCopyMemory(writeInfo, ReadInfo, ReadInfo->Header.Length);
 
-    // Set manufacturer
-    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->Manufacturer);
-    if (manufacturer) {
-        EgidaLogDebug("Original chassis manufacturer: %s", manufacturer);
-        SetStringFromProfile(manufacturer, Context->CurrentProfile.ChassisManufacturer, strlen(manufacturer));
-        EgidaLogDebug("New chassis manufacturer: %s", manufacturer);
-    }
-    else if (strlen(Context->CurrentProfile.ChassisManufacturer) > 0) {
-        AllocateAndSetSmbiosString(&ChassisInfo->Header, ChassisInfo->Manufacturer, Context->CurrentProfile.ChassisManufacturer, Context);
-        EgidaLogDebug("Allocated chassis manufacturer: %s", Context->CurrentProfile.ChassisManufacturer);
-    }
+    PUCHAR stringSectionStart = *WritePtr + ReadInfo->Header.Length;
+    PUCHAR stringSectionEnd = stringSectionStart;
 
-    // Set version
-    PCHAR version = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->Version);
-    if (version) {
-        EgidaLogDebug("Original chassis version: %s", version);
-        SetStringFromProfile(version, Context->CurrentProfile.ChassisVersion, strlen(version));
-        EgidaLogDebug("New chassis version: %s", version);
-    }
-    else if (strlen(Context->CurrentProfile.ChassisVersion) > 0) {
-        AllocateAndSetSmbiosString(&ChassisInfo->Header, ChassisInfo->Version, Context->CurrentProfile.ChassisVersion, Context);
-        EgidaLogDebug("Allocated chassis version: %s", Context->CurrentProfile.ChassisVersion);
-    }
+    PSMBIOS_PROFILE_DATA profile = Context->ProfileData;
 
-    // Set serial number
-    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&ChassisInfo->Header, ChassisInfo->SerialNumber);
-    if (serialNumber) {
-        EgidaLogDebug("Original chassis serial: %s", serialNumber);
-        SetStringFromProfile(serialNumber, Context->CurrentProfile.ChassisSerial, strlen(serialNumber));
-        EgidaLogDebug("New chassis serial: %s", serialNumber);
-    }
-    else if (strlen(Context->CurrentProfile.ChassisSerial) > 0) {
-        AllocateAndSetSmbiosString(&ChassisInfo->Header, ChassisInfo->SerialNumber, Context->CurrentProfile.ChassisSerial, Context);
-        EgidaLogDebug("Allocated chassis serial: %s", Context->CurrentProfile.ChassisSerial);
-    }
+    PCSTR socket = GET_SPOOFED_OR_ORIGINAL(profile->ProcessorSocketDesignation, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->SocketDesignation));
+    PCSTR manufacturer = GET_SPOOFED_OR_ORIGINAL(profile->ProcessorManufacturer, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->ProcessorManufacturer));
+    PCSTR version = GET_SPOOFED_OR_ORIGINAL(profile->ProcessorVersion, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->ProcessorVersion));
+    PCSTR serial = GET_SPOOFED_OR_ORIGINAL(profile->ProcessorSerialNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->SerialNumber));
+    PCSTR assetTag = GET_SPOOFED_OR_ORIGINAL(profile->ProcessorAssetTag, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->AssetTag));
+    PCSTR partNumber = GET_SPOOFED_OR_ORIGINAL(profile->ProcessorPartNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->PartNumber));
 
+    writeInfo->SocketDesignation = AppendString(stringSectionStart, &stringSectionEnd, socket, BufferEnd);
+    writeInfo->ProcessorManufacturer = AppendString(stringSectionStart, &stringSectionEnd, manufacturer, BufferEnd);
+    writeInfo->ProcessorVersion = AppendString(stringSectionStart, &stringSectionEnd, version, BufferEnd);
+    writeInfo->SerialNumber = AppendString(stringSectionStart, &stringSectionEnd, serial, BufferEnd);
+    writeInfo->AssetTag = AppendString(stringSectionStart, &stringSectionEnd, assetTag, BufferEnd);
+    writeInfo->PartNumber = AppendString(stringSectionStart, &stringSectionEnd, partNumber, BufferEnd);
+
+    // Update Processor ID directly
+    writeInfo->ProcessorID = profile->ProcessorID;
+    EgidaLogDebug("Updated processor ID");
+
+    *stringSectionEnd++ = '\0';
+    *WritePtr = stringSectionEnd;
     return EGIDA_SUCCESS;
 }
 
-NTSTATUS SmbiosSpoofer::ProcessProcessorInfo(_In_ PSMBIOS_PROCESSOR_INFO ProcessorInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!ProcessorInfo || !Context) return EGIDA_FAILED;
+NTSTATUS SmbiosSpoofer::ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
+    EgidaLogDebug("Rebuilding Memory Device Information (Type 17)");
+    if (*WritePtr + ReadInfo->Header.Length + 1024 > BufferEnd) return EGIDA_FAILED;
 
-    EgidaLogInfo("Processing Processor Information (Type 4) with profile data");
+    PSMBIOS_MEMORY_DEVICE_INFO writeInfo = (PSMBIOS_MEMORY_DEVICE_INFO)*WritePtr;
+    RtlCopyMemory(writeInfo, ReadInfo, ReadInfo->Header.Length);
 
-    if (strlen(Context->CurrentProfile.ProcessorId) > 0) {
-        EgidaLogDebug("Setting processor ID from profile");
-        UINT64 processorId = 0;
-        for (int i = 0; i < strlen(Context->CurrentProfile.ProcessorId) && i < 16; i++) {
-            char c = Context->CurrentProfile.ProcessorId[i];
-            if (c >= '0' && c <= '9') {
-                processorId = (processorId << 4) | (c - '0');
-            }
-            else if (c >= 'A' && c <= 'F') {
-                processorId = (processorId << 4) | (c - 'A' + 10);
-            }
-            else if (c >= 'a' && c <= 'f') {
-                processorId = (processorId << 4) | (c - 'a' + 10);
-            }
-        }
-        ProcessorInfo->ProcessorID = processorId;
-        EgidaLogDebug("Set processor ID: 0x%llx", processorId);
-    }
+    PUCHAR stringSectionStart = *WritePtr + ReadInfo->Header.Length;
+    PUCHAR stringSectionEnd = stringSectionStart;
 
+    PSMBIOS_PROFILE_DATA profile = Context->ProfileData;
+
+    PCSTR deviceLocator = GET_SPOOFED_OR_ORIGINAL(profile->MemoryDeviceLocator, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->DeviceLocator));
+    PCSTR bankLocator = GET_SPOOFED_OR_ORIGINAL(profile->MemoryBankLocator, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->BankLocator));
+    PCSTR manufacturer = GET_SPOOFED_OR_ORIGINAL(profile->MemoryManufacturer, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->Manufacturer));
+    PCSTR serial = GET_SPOOFED_OR_ORIGINAL(profile->MemorySerialNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->SerialNumber));
+    PCSTR partNumber = GET_SPOOFED_OR_ORIGINAL(profile->MemoryPartNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->PartNumber));
+
+    EgidaLogDebug("Memory Serial: '%s', Memory PartNumber: '%s'", serial, partNumber);
+    EgidaLogDebug("Serial string index: %d, PartNumber string index: %d",
+        writeInfo->SerialNumber, writeInfo->PartNumber);
+    EgidaLogDebug("SMBIOS offsets - SerialNumber: 0x%X, PartNumber: 0x%X",
+        FIELD_OFFSET(SMBIOS_MEMORY_DEVICE_INFO, SerialNumber),
+        FIELD_OFFSET(SMBIOS_MEMORY_DEVICE_INFO, PartNumber));
+    writeInfo->DeviceLocator = AppendString(stringSectionStart, &stringSectionEnd, deviceLocator, BufferEnd);
+    writeInfo->BankLocator = AppendString(stringSectionStart, &stringSectionEnd, bankLocator, BufferEnd);
+    writeInfo->Manufacturer = AppendString(stringSectionStart, &stringSectionEnd, manufacturer, BufferEnd);
+    writeInfo->SerialNumber = AppendString(stringSectionStart, &stringSectionEnd, serial, BufferEnd);
+    writeInfo->PartNumber = AppendString(stringSectionStart, &stringSectionEnd, partNumber, BufferEnd);
+
+    EgidaLogDebug("Updated memory device IDs");
+
+    *stringSectionEnd++ = '\0';
+    *WritePtr = stringSectionEnd;
     return EGIDA_SUCCESS;
-}
-
-NTSTATUS SmbiosSpoofer::ProcessMemoryArrayInfo(_In_ PSMBIOS_MEMORY_ARRAY_INFO MemoryArrayInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!MemoryArrayInfo || !Context) return EGIDA_FAILED;
-
-    EgidaLogInfo("Processing Memory Array Information (Type 16)");
-
-    // Randomize memory error information handle
-    MemoryArrayInfo->MemoryErrorInformationHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
-    EgidaLogDebug("Randomized memory error information handle: 0x%04X", MemoryArrayInfo->MemoryErrorInformationHandle);
-
-    return EGIDA_SUCCESS;
-}
-
-NTSTATUS SmbiosSpoofer::ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO MemoryDeviceInfo, _In_ PEGIDA_CONTEXT Context) {
-    if (!MemoryDeviceInfo || !Context) return EGIDA_FAILED;
-
-    EgidaLogInfo("Processing Memory Device Information (Type 17)");
-
-    // Randomize device locator
-    PCHAR deviceLocator = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->DeviceLocator);
-    if (deviceLocator) {
-        EgidaLogDebug("Original device locator: %s", deviceLocator);
-        EgidaRandomizer::RandomizeString(deviceLocator);
-        EgidaLogDebug("New device locator: %s", deviceLocator);
-    }
-
-    // Randomize bank locator
-    PCHAR bankLocator = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->BankLocator);
-    if (bankLocator) {
-        EgidaLogDebug("Original bank locator: %s", bankLocator);
-        EgidaRandomizer::RandomizeString(bankLocator);
-        EgidaLogDebug("New bank locator: %s", bankLocator);
-    }
-
-    // Randomize manufacturer
-    PCHAR manufacturer = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->Manufacturer);
-    if (manufacturer) {
-        EgidaLogDebug("Original memory manufacturer: %s", manufacturer);
-        EgidaRandomizer::RandomizeString(manufacturer);
-        EgidaLogDebug("New memory manufacturer: %s", manufacturer);
-    }
-
-    // Randomize asset tag
-    PCHAR assetTag = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->AssetTag);
-    if (assetTag) {
-        EgidaLogDebug("Original memory asset tag: %s", assetTag);
-        EgidaRandomizer::RandomizeString(assetTag);
-        EgidaLogDebug("New memory asset tag: %s", assetTag);
-    }
-
-    // Randomize part number
-    PCHAR partNumber = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->PartNumber);
-    if (partNumber) {
-        EgidaLogDebug("Original memory part number: %s", partNumber);
-        EgidaRandomizer::RandomizeString(partNumber);
-        EgidaLogDebug("New memory part number: %s", partNumber);
-    }
-
-    // Randomize firmware version (if present)
-    PCHAR firmwareVersion = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->FirmwareVersion);
-    if (firmwareVersion) {
-        EgidaLogDebug("Original firmware version: %s", firmwareVersion);
-        EgidaRandomizer::RandomizeString(firmwareVersion);
-        EgidaLogDebug("New firmware version: %s", firmwareVersion);
-    }
-
-    // Randomize serial number
-    PCHAR serialNumber = EgidaUtils::GetSmbiosString(&MemoryDeviceInfo->Header, MemoryDeviceInfo->SerialNumber);
-    if (serialNumber) {
-        EgidaLogDebug("Original memory serial: %s", serialNumber);
-        EgidaRandomizer::RandomizeString(serialNumber);
-        EgidaLogDebug("New memory serial: %s", serialNumber);
-    }
-
-    // Randomize memory array handle
-    MemoryDeviceInfo->MemoryArrayHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
-
-    // Randomize memory error information handle
-    MemoryDeviceInfo->MemoryErrorInformationHandle = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFE));
-
-    // Randomize manufacturer and module IDs
-    MemoryDeviceInfo->ModuleManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-    MemoryDeviceInfo->ModuleProductID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-    MemoryDeviceInfo->MemorySubsystemControllerManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-    MemoryDeviceInfo->MemorySubsystemControllerProductID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-
-    // Randomize PMIC and RCD IDs
-    MemoryDeviceInfo->Pmic0ManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-    MemoryDeviceInfo->Pmic0RevisionNumber = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x01, 0xFF));
-    MemoryDeviceInfo->RcdManufacturerID = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x1000, 0xFFFF));
-    MemoryDeviceInfo->RcdRevisionNumber = static_cast<UINT16>(EgidaRandomizer::GetRandomNumber(0x01, 0xFF));
-
-    EgidaLogDebug("Randomized memory device handles and IDs");
-
-    return EGIDA_SUCCESS;
-}
-
-NTSTATUS SmbiosSpoofer::AllocateAndSetSmbiosString(
-    _In_ PSMBIOS_HEADER Header,
-    _In_ SMBIOS_STRING StringNumber,
-    _In_ PCSTR NewValue,
-    _In_ PEGIDA_CONTEXT Context
-) {
-    if (!Header || !NewValue || !Context) {
-        return EGIDA_FAILED;
-    }
-
-    // Get pointer to existing string
-    PCHAR existingString = EgidaUtils::GetSmbiosString(Header, StringNumber);
-
-    SIZE_T newValueLength = strlen(NewValue);
-    SIZE_T allocSize = newValueLength + 1;
-
-    if (!existingString) {
-        // Field is null - need to allocate memory
-        EgidaLogDebug("SMBIOS string %d is null, allocating memory (size: %zu)", StringNumber, allocSize);
-
-        PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
-        if (!allocatedString) {
-            EgidaLogError("Failed to allocate SMBIOS string memory");
-            return EGIDA_INSUFFICIENT_RESOURCES;
-        }
-
-        // Use direct character-by-character copy like the randomizer
-        for (SIZE_T i = 0; i < newValueLength; i++) {
-            allocatedString[i] = NewValue[i];
-        }
-        allocatedString[newValueLength] = '\0';
-
-        // Track allocated memory
-        NTSTATUS status = TrackAllocatedSmbiosString(Context, allocatedString, allocSize, Header, StringNumber);
-        if (!NT_SUCCESS(status)) {
-            EGIDA_FREE(allocatedString);
-            return status;
-        }
-
-        EgidaLogDebug("Allocated and set SMBIOS string: %s", NewValue);
-    }
-    else {
-        // Field exists - modify in place using direct character modification
-        SIZE_T existingLength = strlen(existingString);
-        SIZE_T copyLength = min(newValueLength, existingLength);
-
-        // Direct character-by-character modification
-        for (SIZE_T i = 0; i < copyLength; i++) {
-            existingString[i] = NewValue[i];
-        }
-
-        // Null terminate if we have space
-        if (copyLength < existingLength) {
-            existingString[copyLength] = '\0';
-        }
-
-        EgidaLogDebug("Modified existing SMBIOS string: %s", NewValue);
-
-        // If the new value is longer than existing space, we need to allocate
-        if (newValueLength > existingLength) {
-            PCHAR allocatedString = static_cast<PCHAR>(EGIDA_ALLOC_NON_PAGED(allocSize));
-            if (!allocatedString) {
-                EgidaLogError("Failed to allocate larger SMBIOS string memory");
-                return EGIDA_INSUFFICIENT_RESOURCES;
-            }
-
-            // Use direct character copying
-            for (SIZE_T i = 0; i < newValueLength; i++) {
-                allocatedString[i] = NewValue[i];
-            }
-            allocatedString[newValueLength] = '\0';
-
-            // Clear old string
-            RtlZeroMemory(existingString, existingLength);
-
-            // Track new allocated memory
-            NTSTATUS status = TrackAllocatedSmbiosString(Context, allocatedString, allocSize, Header, StringNumber);
-            if (!NT_SUCCESS(status)) {
-                EGIDA_FREE(allocatedString);
-                return status;
-            }
-
-            EgidaLogDebug("Allocated larger SMBIOS string: %s", NewValue);
-        }
-    }
-
-    return EGIDA_SUCCESS;
-}
-
-NTSTATUS SmbiosSpoofer::TrackAllocatedSmbiosString(
-    _In_ PEGIDA_CONTEXT Context,
-    _In_ PCHAR StringPointer,
-    _In_ SIZE_T StringSize,
-    _In_ PSMBIOS_HEADER Header,
-    _In_ SMBIOS_STRING StringNumber
-) {
-    // Expand tracking array
-    ULONG newCount = Context->SmbiosAllocatedStringCount + 1;
-    PSMBIOS_ALLOCATED_STRING newArray = static_cast<PSMBIOS_ALLOCATED_STRING>(
-        EGIDA_ALLOC_NON_PAGED(newCount * sizeof(SMBIOS_ALLOCATED_STRING))
-        );
-
-    if (!newArray) {
-        return EGIDA_INSUFFICIENT_RESOURCES;
-    }
-
-    // Copy existing entries
-    if (Context->SmbiosAllocatedStrings) {
-        RtlCopyMemory(newArray, Context->SmbiosAllocatedStrings,
-            Context->SmbiosAllocatedStringCount * sizeof(SMBIOS_ALLOCATED_STRING));
-        EGIDA_FREE(Context->SmbiosAllocatedStrings);
-    }
-
-    // Add new entry
-    newArray[Context->SmbiosAllocatedStringCount].StringPointer = StringPointer;
-    newArray[Context->SmbiosAllocatedStringCount].StringSize = StringSize;
-    newArray[Context->SmbiosAllocatedStringCount].OwnerHeader = Header;
-    newArray[Context->SmbiosAllocatedStringCount].StringNumber = StringNumber;
-
-    Context->SmbiosAllocatedStrings = newArray;
-    Context->SmbiosAllocatedStringCount = newCount;
-
-    return EGIDA_SUCCESS;
-}
-
-VOID SmbiosSpoofer::FreeSmbiosAllocatedStrings(_In_ PEGIDA_CONTEXT Context) {
-    if (!Context || !Context->SmbiosAllocatedStrings) {
-        return;
-    }
-
-    EgidaLogDebug("Freeing %lu allocated SMBIOS strings", Context->SmbiosAllocatedStringCount);
-
-    for (ULONG i = 0; i < Context->SmbiosAllocatedStringCount; i++) {
-        if (Context->SmbiosAllocatedStrings[i].StringPointer) {
-            EgidaLogDebug("Freeing SMBIOS string %d (size: %zu)",
-                Context->SmbiosAllocatedStrings[i].StringNumber,
-                Context->SmbiosAllocatedStrings[i].StringSize);
-
-            EGIDA_FREE(Context->SmbiosAllocatedStrings[i].StringPointer);
-            Context->SmbiosAllocatedStrings[i].StringPointer = nullptr;
-        }
-    }
-
-    EGIDA_FREE(Context->SmbiosAllocatedStrings);
-    Context->SmbiosAllocatedStrings = nullptr;
-    Context->SmbiosAllocatedStringCount = 0;
-
-    EgidaLogDebug("SMBIOS string cleanup completed");
 }

@@ -117,21 +117,17 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Core\EgidaCore.cpp" />
-    <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\Modules\DiskSpoofer.cpp" />
-    <ClCompile Include="src\Modules\GpuSpoofer.cpp" />
     <ClCompile Include="src\Modules\NetworkSpoofer.cpp" />
     <ClCompile Include="src\Modules\SmbiosSpoofer.cpp" />
     <ClCompile Include="src\Utils\EgidaUtils.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\Common\Definitions.h" />
-    <ClInclude Include="src\Common\Globals.h" />
     <ClInclude Include="src\Common\Structures.h" />
     <ClInclude Include="src\Core\EgidaCore.h" />
     <ClInclude Include="src\Core\Logger.h" />
     <ClInclude Include="src\Modules\DiskSpoofer.h" />
-    <ClInclude Include="src\Modules\GpuSpoofer.h" />
     <ClInclude Include="src\Modules\NetworkSpoofer.h" />
     <ClInclude Include="src\Modules\SmbiosSpoofer.h" />
     <ClInclude Include="src\Utils\EgidaUtils.h" />
