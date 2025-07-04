@@ -8,6 +8,9 @@ PPHYSICAL_ADDRESS SmbiosSpoofer::s_SmbiosPhysicalAddress = nullptr;
 PULONG SmbiosSpoofer::s_SmbiosTableLength = nullptr;
 PBOOT_ENVIRONMENT_INFORMATION SmbiosSpoofer::s_BootEnvironmentInfo = nullptr;
 
+#define GET_ORIGINAL_STRING(header, index) (index == 0 ? "" : EgidaUtils::GetSmbiosString(header, index))
+#define GET_SPOOFED_OR_ORIGINAL(profile_str, original_str) (strlen(profile_str) > 0 ? profile_str : original_str)
+
 NTSTATUS SmbiosSpoofer::Initialize(_In_ PEGIDA_CONTEXT Context) {
     EgidaLogInfo("Initializing SMBIOS Spoofer...");
 
@@ -85,37 +88,71 @@ NTSTATUS SmbiosSpoofer::Initialize(_In_ PEGIDA_CONTEXT Context) {
 }
 
 static UCHAR AppendString(PUCHAR stringSectionStart, PUCHAR* currentStringEnd, PCSTR stringToWrite, PUCHAR bufferEnd) {
-    
-    if (!stringToWrite || *stringToWrite == '\0') {
-        EgidaLogDebug("AppendString returning 0 - empty string");
+    EgidaLogDebug("AppendString ENTRY: string='%s', start=0x%p, currentEnd=0x%p, bufferEnd=0x%p",
+        stringToWrite ? stringToWrite : "NULL", stringSectionStart, *currentStringEnd, bufferEnd);
+
+    if (!stringToWrite) {
+        EgidaLogDebug("AppendString: stringToWrite is NULL, returning 0");
         return 0;
     }
 
-    PUCHAR scanner = stringSectionStart;
+    if (*stringToWrite == '\0') {
+        EgidaLogDebug("AppendString: stringToWrite is empty, returning 0");
+        return 0;
+    }
+
+    EgidaLogDebug("AppendString: string is valid, proceeding...");
+
     UCHAR stringNumber = 1;
+    PUCHAR scanner = stringSectionStart;
 
-    // First, check if the string already exists to avoid duplicates
+    EgidaLogDebug("AppendString: calculating string number, starting from 1");
+
     while (scanner < *currentStringEnd) {
-        if (strcmp((PCSTR)scanner, stringToWrite) == 0) {
-            return stringNumber;
-        }
-        scanner += strlen((PCSTR)scanner) + 1;
+        EgidaLogDebug("AppendString: found existing string at 0x%p: '%.20s'", scanner, scanner);
+        SIZE_T len = strlen((PCSTR)scanner);
+        scanner += len + 1;
         stringNumber++;
+        EgidaLogDebug("AppendString: moved to next string, stringNumber now = %d", stringNumber);
     }
 
-    // String not found, append it if there's space
-    SIZE_T newStringLen = strlen(stringToWrite) + 1;
-    if (*currentStringEnd + newStringLen > bufferEnd) {
-        EgidaLogWarning("Not enough space in buffer to add new string: %s (need %zu bytes)", stringToWrite, newStringLen);
+    EgidaLogDebug("AppendString: calculated stringNumber = %d", stringNumber);
+
+    SIZE_T originalStringLen = strlen(stringToWrite);
+    SIZE_T availableSpace = bufferEnd - *currentStringEnd;
+
+    // Учитываем null terminator
+    if (availableSpace < 2) { // Минимум 1 символ + null terminator
+        EgidaLogError("AppendString: Not enough space even for 1 char + null terminator");
         return 0;
     }
 
-    RtlCopyMemory(*currentStringEnd, stringToWrite, newStringLen);
-    *currentStringEnd += newStringLen;
+    SIZE_T maxStringLen = availableSpace - 1; // Резервируем место для null terminator
+    SIZE_T actualStringLen = min(originalStringLen, maxStringLen);
+
+    EgidaLogDebug("AppendString: original len=%zu, available=%zu, actual len=%zu",
+        originalStringLen, availableSpace, actualStringLen);
+
+    if (actualStringLen < originalStringLen) {
+        EgidaLogWarning("AppendString: Truncating string '%s' from %zu to %zu chars",
+            stringToWrite, originalStringLen, actualStringLen);
+    }
+
+    EgidaLogDebug("AppendString: copying %zu bytes to 0x%p", actualStringLen, *currentStringEnd);
+
+    // Копируем только actualStringLen символов
+    RtlCopyMemory(*currentStringEnd, stringToWrite, actualStringLen);
+
+    // Добавляем null terminator
+    (*currentStringEnd)[actualStringLen] = '\0';
+
+    *currentStringEnd += actualStringLen + 1;
+
+    EgidaLogDebug("AppendString: SUCCESS! Returning stringNumber = %d, new currentStringEnd = 0x%p",
+        stringNumber, *currentStringEnd);
 
     return stringNumber;
 }
-
 
 NTSTATUS SmbiosSpoofer::ChangeBootEnvironmentInfo(_In_ PEGIDA_CONTEXT Context) {
     if (!Context || !s_BootEnvironmentInfo || !Context->ProfileData) {
@@ -344,10 +381,6 @@ NTSTATUS SmbiosSpoofer::LoopAndRebuildSmbiosTables(_In_ PVOID ReadBase, _In_ ULO
     return EGIDA_SUCCESS;
 }
 
-
-#define GET_ORIGINAL_STRING(header, index) (index == 0 ? "" : EgidaUtils::GetSmbiosString(header, index))
-#define GET_SPOOFED_OR_ORIGINAL(profile_str, original_str) (strlen(profile_str) > 0 ? profile_str : original_str)
-
 NTSTATUS SmbiosSpoofer::ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
     EgidaLogDebug("Rebuilding BIOS Information (Type 0)");
     if (*WritePtr + ReadInfo->Header.Length + 256 > BufferEnd) return EGIDA_FAILED; // Safety margin for strings
@@ -372,7 +405,6 @@ NTSTATUS SmbiosSpoofer::ProcessBiosInfo(_In_ PSMBIOS_BIOS_INFO ReadInfo, _In_ PU
     *WritePtr = stringSectionEnd;
     return EGIDA_SUCCESS;
 }
-
 
 NTSTATUS SmbiosSpoofer::ProcessSystemInfo(_In_ PSMBIOS_SYSTEM_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
     EgidaLogDebug("Rebuilding System Information (Type 1)");
@@ -440,7 +472,6 @@ NTSTATUS SmbiosSpoofer::ProcessBaseboardInfo(_In_ PSMBIOS_BASEBOARD_INFO ReadInf
     return EGIDA_SUCCESS;
 }
 
-
 NTSTATUS SmbiosSpoofer::ProcessChassisInfo(_In_ PSMBIOS_CHASSIS_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
     EgidaLogDebug("Rebuilding Chassis Information (Type 3)");
     if (*WritePtr + ReadInfo->Header.Length + 512 > BufferEnd) return EGIDA_FAILED;
@@ -505,7 +536,7 @@ NTSTATUS SmbiosSpoofer::ProcessProcessorInfo(_In_ PSMBIOS_PROCESSOR_INFO ReadInf
 
 NTSTATUS SmbiosSpoofer::ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO ReadInfo, _In_ PUCHAR* WritePtr, _In_ PUCHAR BufferEnd, _In_ PEGIDA_CONTEXT Context) {
     EgidaLogDebug("Rebuilding Memory Device Information (Type 17)");
-    if (*WritePtr + ReadInfo->Header.Length + 1024 > BufferEnd) return EGIDA_FAILED;
+    if (*WritePtr + ReadInfo->Header.Length + 2048 > BufferEnd) return EGIDA_FAILED;
 
     PSMBIOS_MEMORY_DEVICE_INFO writeInfo = (PSMBIOS_MEMORY_DEVICE_INFO)*WritePtr;
     RtlCopyMemory(writeInfo, ReadInfo, ReadInfo->Header.Length);
@@ -522,17 +553,20 @@ NTSTATUS SmbiosSpoofer::ProcessMemoryDeviceInfo(_In_ PSMBIOS_MEMORY_DEVICE_INFO 
     PCSTR partNumber = GET_SPOOFED_OR_ORIGINAL(profile->MemoryPartNumber, GET_ORIGINAL_STRING(&ReadInfo->Header, ReadInfo->PartNumber));
 
     EgidaLogDebug("Memory Serial: '%s', Memory PartNumber: '%s'", serial, partNumber);
+    
     EgidaLogDebug("Serial string index: %d, PartNumber string index: %d",
         writeInfo->SerialNumber, writeInfo->PartNumber);
+    
     EgidaLogDebug("SMBIOS offsets - SerialNumber: 0x%X, PartNumber: 0x%X",
         FIELD_OFFSET(SMBIOS_MEMORY_DEVICE_INFO, SerialNumber),
         FIELD_OFFSET(SMBIOS_MEMORY_DEVICE_INFO, PartNumber));
+    
     writeInfo->DeviceLocator = AppendString(stringSectionStart, &stringSectionEnd, deviceLocator, BufferEnd);
     writeInfo->BankLocator = AppendString(stringSectionStart, &stringSectionEnd, bankLocator, BufferEnd);
     writeInfo->Manufacturer = AppendString(stringSectionStart, &stringSectionEnd, manufacturer, BufferEnd);
     writeInfo->SerialNumber = AppendString(stringSectionStart, &stringSectionEnd, serial, BufferEnd);
     writeInfo->PartNumber = AppendString(stringSectionStart, &stringSectionEnd, partNumber, BufferEnd);
-
+    
     EgidaLogDebug("Updated memory device IDs");
 
     *stringSectionEnd++ = '\0';

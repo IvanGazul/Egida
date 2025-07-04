@@ -232,11 +232,11 @@ typedef struct _SMBIOS_MEMORY_DEVICE_INFO
     USHORT	TotalWidth;
     USHORT	DataWidth;
     USHORT	Size;
-    SMBIOS_STRING	FormFactor;
+    UCHAR 	FormFactor;
     SMBIOS_STRING	DeviceSet;
     SMBIOS_STRING	DeviceLocator;
     SMBIOS_STRING	BankLocator;
-    SMBIOS_STRING	MemoryType;
+    UCHAR 	MemoryType;
     USHORT	TypeDetail;
     USHORT	Speed;
     SMBIOS_STRING   Manufacturer;

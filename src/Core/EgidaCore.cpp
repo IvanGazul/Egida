@@ -156,7 +156,7 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
     UNREFERENCED_PARAMETER(RegistryPath);
 
     EgidaLogInitialize();
-    EgidaLogInfo("Egida Driver v%s loading...", EGIDA_VERSION);
+    EgidaLogInfo("Egida Driver is loading...", EGIDA_VERSION);
 
     // Set dispatch routines
     DriverObject->DriverUnload = EgidaUnloadDriver;

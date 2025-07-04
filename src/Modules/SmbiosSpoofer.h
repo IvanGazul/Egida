@@ -63,4 +63,14 @@ private:
     static PPHYSICAL_ADDRESS s_SmbiosPhysicalAddress;
     static PULONG s_SmbiosTableLength;
     static PBOOT_ENVIRONMENT_INFORMATION s_BootEnvironmentInfo;
+
+    static NTSTATUS EditSmbiosTablesInPlace(_In_ PVOID TableBase, _In_ ULONG TableSize, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditSmbiosStructureInPlace(_In_ PSMBIOS_HEADER Header, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditBiosInfoInPlace(_In_ PSMBIOS_BIOS_INFO BiosInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditSystemInfoInPlace(_In_ PSMBIOS_SYSTEM_INFO SystemInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditBaseboardInfoInPlace(_In_ PSMBIOS_BASEBOARD_INFO BaseboardInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditChassisInfoInPlace(_In_ PSMBIOS_CHASSIS_INFO ChassisInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditProcessorInfoInPlace(_In_ PSMBIOS_PROCESSOR_INFO ProcessorInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditMemoryDeviceInfoInPlace(_In_ PSMBIOS_MEMORY_DEVICE_INFO MemoryInfo, _In_ PEGIDA_CONTEXT Context);
+    static NTSTATUS EditStringInPlace(_In_ PSMBIOS_HEADER Header, _In_ SMBIOS_STRING StringIndex, _In_ PCSTR NewValue);
 };
