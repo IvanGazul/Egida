@@ -26,9 +26,9 @@ extern "C" {
 #define SYMBOLIC_LINK L"\\DosDevices\\Egida"
 
 // Status codes
-#define EGIDA_SUCCESS               STATUS_SUCCESS
-#define EGIDA_FAILED                STATUS_UNSUCCESSFUL
-#define EGIDA_NOT_FOUND            STATUS_NOT_FOUND
+#define EGIDA_SUCCESS                STATUS_SUCCESS
+#define EGIDA_FAILED                 STATUS_UNSUCCESSFUL
+#define EGIDA_NOT_FOUND              STATUS_NOT_FOUND
 #define EGIDA_INSUFFICIENT_RESOURCES STATUS_INSUFFICIENT_RESOURCES
 
 // Debug levels

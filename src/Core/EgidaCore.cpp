@@ -11,6 +11,11 @@ PEGIDA_CONTEXT g_EgidaGlobalContext = nullptr;
 NTSTATUS EgidaCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 
+// Helper functions
+VOID UpdateContextStatus(_In_ PEGIDA_CONTEXT Context, _In_ PCSTR ProfileName);
+VOID ClearContextStatus(_In_ PEGIDA_CONTEXT Context);
+NTSTATUS GetDriverStatus(_In_ PEGIDA_CONTEXT Context, _Out_ PDRIVER_STATUS Status);
+
 NTSTATUS EgidaCore::Initialize(_Out_ PEGIDA_CONTEXT* Context) {
     EGIDA_PAGED_CODE();
     EgidaLogInfo("Initializing Egida Core...");
@@ -42,6 +47,10 @@ NTSTATUS EgidaCore::Initialize(_Out_ PEGIDA_CONTEXT* Context) {
     context->IsInitialized = TRUE;
     context->IsSpoofingActive = FALSE;
     context->HasProfile = FALSE;
+    context->ActiveSpoofModules = 0;
+    RtlZeroMemory(context->ActiveProfileName, sizeof(context->ActiveProfileName));
+    context->ProfileAppliedTime.QuadPart = 0;
+
     *Context = context;
 
     EgidaLogInfo("Egida Core initialized - waiting for profile from UserMode");
@@ -56,6 +65,9 @@ NTSTATUS EgidaCore::Cleanup(_In_ PEGIDA_CONTEXT Context) {
     }
 
     EgidaLogInfo("Cleaning up Egida Core...");
+
+    // Clear status
+    ClearContextStatus(Context);
 
     // Free profile data if allocated
     if (Context->ProfileData) {
@@ -85,13 +97,18 @@ NTSTATUS EgidaCore::ExecuteAllSpoofs(_In_ PEGIDA_CONTEXT Context) {
         return EGIDA_FAILED;
     }
 
-    EgidaLogInfo("Starting HWID spoofing with provided profile...");
+    EgidaLogInfo("Starting HWID spoofing with profile: %s", Context->ProfileData->ProfileName);
     NTSTATUS status = EGIDA_SUCCESS;
+    ULONG successfulModules = 0;
 
     // SMBIOS Spoofing
     EgidaLogInfo("Starting SMBIOS spoofing...");
     status = SmbiosSpoofer::ExecuteSpoof(Context);
-    if (!NT_SUCCESS(status)) {
+    if (NT_SUCCESS(status)) {
+        successfulModules |= SPOOF_MODULE_SMBIOS;
+        EgidaLogInfo("SMBIOS spoofing completed successfully");
+    }
+    else {
         EgidaLogError("SMBIOS spoofing failed: 0x%08X", status);
         return status;
     }
@@ -99,21 +116,33 @@ NTSTATUS EgidaCore::ExecuteAllSpoofs(_In_ PEGIDA_CONTEXT Context) {
     // Disk Spoofing
     EgidaLogInfo("Starting Disk spoofing...");
     status = DiskSpoofer::ExecuteSpoof(Context);
-    if (!NT_SUCCESS(status)) {
-        EgidaLogError("Disk spoofing failed: 0x%08X", status);
-        //return status;
+    if (NT_SUCCESS(status)) {
+        successfulModules |= SPOOF_MODULE_DISK;
+        EgidaLogInfo("Disk spoofing completed successfully");
+    }
+    else {
+        EgidaLogWarning("Disk spoofing failed: 0x%08X (continuing)", status);
+        // Don't return error, disk spoofing might fail but it's not critical
     }
 
     // Network Spoofing
     EgidaLogInfo("Starting Network spoofing...");
     status = NetworkSpoofer::ExecuteSpoof(Context);
-    if (!NT_SUCCESS(status)) {
+    if (NT_SUCCESS(status)) {
+        successfulModules |= SPOOF_MODULE_NETWORK;
+        EgidaLogInfo("Network spoofing completed successfully");
+    }
+    else {
         EgidaLogError("Network spoofing failed: 0x%08X", status);
         return status;
     }
 
+    // Update context status
     Context->IsSpoofingActive = TRUE;
-    EgidaLogInfo("HWID spoofing completed successfully");
+    Context->ActiveSpoofModules = successfulModules;
+    UpdateContextStatus(Context, Context->ProfileData->ProfileName);
+
+    EgidaLogInfo("HWID spoofing completed successfully. Active modules: 0x%02X", successfulModules);
     return EGIDA_SUCCESS;
 }
 
@@ -149,6 +178,58 @@ VOID EgidaCore::CleanupModules(_In_ PEGIDA_CONTEXT Context) {
     SmbiosSpoofer::Cleanup(Context);
     DiskSpoofer::Cleanup(Context);
     NetworkSpoofer::Cleanup(Context);
+}
+
+// Helper functions implementation
+VOID UpdateContextStatus(_In_ PEGIDA_CONTEXT Context, _In_ PCSTR ProfileName) {
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&Context->SpinLock, &oldIrql);
+
+    // Update profile name
+    RtlZeroMemory(Context->ActiveProfileName, sizeof(Context->ActiveProfileName));
+    if (ProfileName && strlen(ProfileName) > 0) {
+        strncpy_s(Context->ActiveProfileName, sizeof(Context->ActiveProfileName),
+            ProfileName, _TRUNCATE);
+    }
+
+    // Update timestamp
+    KeQuerySystemTime(&Context->ProfileAppliedTime);
+
+    KeReleaseSpinLock(&Context->SpinLock, oldIrql);
+}
+
+VOID ClearContextStatus(_In_ PEGIDA_CONTEXT Context) {
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&Context->SpinLock, &oldIrql);
+
+    RtlZeroMemory(Context->ActiveProfileName, sizeof(Context->ActiveProfileName));
+    Context->ProfileAppliedTime.QuadPart = 0;
+    Context->ActiveSpoofModules = 0;
+
+    KeReleaseSpinLock(&Context->SpinLock, oldIrql);
+}
+
+NTSTATUS GetDriverStatus(_In_ PEGIDA_CONTEXT Context, _Out_ PDRIVER_STATUS Status) {
+    if (!Context || !Status) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&Context->SpinLock, &oldIrql);
+
+    RtlZeroMemory(Status, sizeof(DRIVER_STATUS));
+    Status->ProfileActive = Context->HasProfile && Context->IsSpoofingActive;
+    Status->IsSpoofingActive = Context->IsSpoofingActive;
+    Status->ActiveSpoofModules = Context->ActiveSpoofModules;
+    Status->ProfileAppliedTime = Context->ProfileAppliedTime;
+
+    if (Status->ProfileActive) {
+        strncpy_s(Status->ActiveProfileName, sizeof(Status->ActiveProfileName),
+            Context->ActiveProfileName, _TRUNCATE);
+    }
+
+    KeReleaseSpinLock(&Context->SpinLock, oldIrql);
+    return STATUS_SUCCESS;
 }
 
 // Driver entry points implementation
@@ -282,6 +363,7 @@ NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
             DiskSpoofer::StopSpoof(g_EgidaGlobalContext);
             NetworkSpoofer::StopSpoof(g_EgidaGlobalContext);
             g_EgidaGlobalContext->IsSpoofingActive = FALSE;
+            ClearContextStatus(g_EgidaGlobalContext);
         }
 
         // Allocate and copy new profile
@@ -302,7 +384,7 @@ NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
         );
 
         g_EgidaGlobalContext->HasProfile = TRUE;
-        EgidaLogInfo("Profile data set successfully");
+        EgidaLogInfo("Profile data set successfully: %s", g_EgidaGlobalContext->ProfileData->ProfileName);
         status = STATUS_SUCCESS;
         break;
     }
@@ -335,8 +417,33 @@ NTSTATUS EgidaDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
         NetworkSpoofer::StopSpoof(g_EgidaGlobalContext);
 
         g_EgidaGlobalContext->IsSpoofingActive = FALSE;
+        ClearContextStatus(g_EgidaGlobalContext);
         EgidaLogInfo("Spoofing stopped");
         status = STATUS_SUCCESS;
+        break;
+    }
+
+    case IOCTL_EGIDA_GET_STATUS: {
+        EgidaLogInfo("Received GET_STATUS IOCTL");
+
+        ULONG outputSize = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+        ULONG expectedSize = sizeof(DRIVER_STATUS);
+
+        if (outputSize < expectedSize) {
+            EgidaLogError("Invalid output buffer size: %lu (expected: %lu)", outputSize, expectedSize);
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PDRIVER_STATUS driverStatus = static_cast<PDRIVER_STATUS>(Irp->AssociatedIrp.SystemBuffer);
+        status = GetDriverStatus(g_EgidaGlobalContext, driverStatus);
+
+        if (NT_SUCCESS(status)) {
+            information = sizeof(DRIVER_STATUS);
+            EgidaLogInfo("Driver status retrieved successfully. Profile active: %s, Name: %s",
+                driverStatus->ProfileActive ? "Yes" : "No",
+                driverStatus->ProfileActive ? driverStatus->ActiveProfileName : "None");
+        }
         break;
     }
 

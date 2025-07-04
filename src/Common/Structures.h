@@ -5,9 +5,23 @@
 // Forward declarations
 typedef struct _EGIDA_CONTEXT EGIDA_CONTEXT, * PEGIDA_CONTEXT;
 
+// Структура для получения статуса драйвера
+#pragma pack(push, 1)
+typedef struct _DRIVER_STATUS {
+    BOOLEAN ProfileActive;
+    CHAR ActiveProfileName[64];
+    LARGE_INTEGER ProfileAppliedTime; // Время применения профиля
+    BOOLEAN IsSpoofingActive;
+    ULONG ActiveSpoofModules; // Битовая маска активных модулей
+} DRIVER_STATUS, * PDRIVER_STATUS;
+#pragma pack(pop)
+
 // Profile data structures for receiving from UserMode
 #pragma pack(push, 1)
 typedef struct _SMBIOS_PROFILE_DATA {
+    // Profile identification
+    CHAR ProfileName[64]; // Добавляем имя профиля
+
     // BIOS Information (Type 0)
     CHAR BiosVendor[EGIDA_MAX_STRING_LENGTH];
     CHAR BiosVersion[EGIDA_MAX_STRING_LENGTH];
@@ -83,6 +97,12 @@ typedef struct _SMBIOS_PROFILE_DATA {
 #define IOCTL_EGIDA_SET_PROFILE CTL_CODE(FILE_DEVICE_UNKNOWN, EGIDA_IOCTL_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_EGIDA_EXECUTE_SPOOF CTL_CODE(FILE_DEVICE_UNKNOWN, EGIDA_IOCTL_BASE + 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_EGIDA_STOP_SPOOF CTL_CODE(FILE_DEVICE_UNKNOWN, EGIDA_IOCTL_BASE + 3, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_EGIDA_GET_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, EGIDA_IOCTL_BASE + 4, METHOD_BUFFERED, FILE_ANY_ACCESS) // Новый IOCTL
+
+// Битовые флаги для активных модулей спуфинга
+#define SPOOF_MODULE_SMBIOS     0x01
+#define SPOOF_MODULE_DISK       0x02
+#define SPOOF_MODULE_NETWORK    0x04
 
 // SMBIOS Structures
 typedef struct _SMBIOS_HEADER {
@@ -224,9 +244,9 @@ typedef struct _SMBIOS_MEMORY_ARRAY_INFO {
 } SMBIOS_MEMORY_ARRAY_INFO, * PSMBIOS_MEMORY_ARRAY_INFO;
 
 // Memory Device Information (Type 17)
-typedef struct _SMBIOS_MEMORY_DEVICE_INFO 
+typedef struct _SMBIOS_MEMORY_DEVICE_INFO
 {
-	SMBIOS_HEADER Header;
+    SMBIOS_HEADER Header;
     USHORT	MemArrayHandle;
     USHORT	MemErrorInfoHandle;
     USHORT	TotalWidth;
@@ -269,6 +289,11 @@ typedef struct _EGIDA_CONTEXT {
     BOOLEAN IsInitialized;
     BOOLEAN IsSpoofingActive;
     BOOLEAN HasProfile;
+
+    // Profile status tracking
+    CHAR ActiveProfileName[64];
+    LARGE_INTEGER ProfileAppliedTime;
+    ULONG ActiveSpoofModules; // Битовая маска активных модулей
 
     // Device object for communication
     PDEVICE_OBJECT DeviceObject;
