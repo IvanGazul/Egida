@@ -1,7 +1,7 @@
 # EGIDA - HWID Spoofer for Windows 10/11 x64
 
 ![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)
-![Status](https://img.shields.io/badge/status-development-orange)
+![Status](https://img.shields.io/badge/status-release-green)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 EGIDA is a lightweight, kernel-level HWID spoofer for Windows 10/11 x64 systems.  
