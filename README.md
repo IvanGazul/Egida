@@ -1,47 +1,33 @@
-# EGIDA - HWID Spoofer for Windows 10/11 x64
+# EGIDA - Hardware Telemetry Virtualizer for Windows 10/11 x64
 
-![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)
-![Status](https://img.shields.io/badge/status-release-green)
-![License](https://img.shields.io/badge/license-MIT-green)
+EGIDA is a lightweight, kernel-level driver designed to modify and virtualize system hardware identifiers on Windows 10/11 x64 systems.
 
-EGIDA is a lightweight, kernel-level HWID spoofer for Windows 10/11 x64 systems.  
-Designed for educational and research purposes, EGIDA can spoof several hardware identifiers to bypass basic hardware bans and fingerprinting techniques.
+Designed strictly for educational and research purposes, EGIDA allows security researchers to evaluate system fingerprinting techniques, analyze OS telemetry, and test hardware-based software licensing mechanisms.
 
-> ⚠️ This project is for **educational** purposes only. Using it to bypass restrictions in unauthorized ways may violate Terms of Service of third-party software or platforms.
-
----
+⚠️ **Disclaimer:** This project is for educational and privacy research purposes only. 
 
 ## ✨ Features
-
-- [x] Disk Serial Number Spoofing
-- [x] SMBIOS (Motherboard/Baseboard) Serial Spoofing
-- [x] CPU ID Patch (ProcessorId)
-- [x] Computer Name and Username Randomization
-- [x] Registry Traces Cleaner
-- [x] Fully x64 Supported (Tested on Windows 10/11)
-- [x] Supports UEFI-based systems
-- [x] No dependency on external usermode applications
-- [x] Profile System — create, save and apply custom spoofing profiles
----
+* **Disk Volume ID Virtualization:** Dynamically alters disk serial numbers returned by the system.
+* **SMBIOS Table Modification:** Customizes Motherboard/Baseboard descriptors in memory.
+* **CPU ID Masking:** Patches responses to `ProcessorId` queries.
+* **System Identity Randomization:** Manages Computer Name and Username variables.
+* **Registry Telemetry Cleaning:** Clears cached hardware traces in the registry.
+* **Fully x64 Supported:** Tested on modern Windows 10/11 environments.
+* **UEFI-compatible:** Supports UEFI-based systems.
+* **Standalone Operation:** No dependency on external usermode applications.
+* **Profile System:** Create, save, and apply custom hardware telemetry configurations.
 
 ## 📌 Planned Features
-- [ ] Steam Deep Cleaning — remove residual Steam identifiers and traces
-- [ ] NVIDIA Spoofing — clean or spoof GPU UUID, BIOS version, and driver strings
----
+* **Application Telemetry Clearing:** Remove residual hardware identifiers cached by complex software platforms.
+* **GPU Data Modification:** Clean or virtualize GPU UUIDs, BIOS versions, and driver strings for privacy research.
 
 ## 🔧 Requirements
-
-- Windows 10 / 11 x64
-- Test Signing Mode enabled (or use KDMapper / EFIGuard)
-- Secure Boot **disabled**
-- Administrator privileges
-
----
+* Windows 10 / 11 x64
+* Test Signing Mode enabled (or use KDMapper / EFIGuard)
+* Secure Boot disabled
+* Administrator privileges
 
 ## 🧪 How It Works
+EGIDA operates by loading a kernel-mode driver that temporarily intercepts and modifies values returned by key Windows management interfaces (such as `wmic`, `GetVolumeInformation`, `GetSystemFirmwareTable`, and others). 
 
-EGIDA operates by loading a kernel-mode driver that temporarily modifies values returned by key Windows management interfaces like `wmic`, `GetVolumeInformation`, `GetSystemFirmwareTable`, and others.
-
-It hooks and patches kernel functions and modifies SMBIOS tables and disk device descriptors in memory.
-
----
+It hooks and patches kernel functions, dynamically modifying SMBIOS tables and disk device descriptors directly in memory without permanent hardware alterations.
